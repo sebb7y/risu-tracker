@@ -25,7 +25,7 @@
   const plotWidth = chartWidth - padding.left - padding.right;
   const plotHeight = chartHeight - padding.top - padding.bottom;
 
-  let range: Range = '180';
+  let range: Range = 'all';
   let scale: Scale = 'hours';
   let mode: Mode = 'cumulative';
   let enabled: Record<string, boolean> = {};
