@@ -1,0 +1,939 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import ImmersionHeatmaps from '../../components/svelte/ImmersionHeatmaps.svelte';
+import ImmersionLogDialog from '../../components/svelte/ImmersionLogDialog.svelte';
+import MonthlyBreakdown from '../../components/svelte/MonthlyBreakdown.svelte';
+
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+type CanonicalMediaType = 'reading' | 'listening' | 'anime' | 'manga' | 'other';
+
+interface ImmersionLog {
+  logId: number;
+  mediaType: string;
+  canonicalType: CanonicalMediaType;
+  amount: number;
+  points: number;
+  date: Date;
+  logDayKey: string;
+  mediaName: string;
+  comment: string;
+}
+
+interface MonthBucket {
+  key: string;
+  label: string;
+  totals: Record<CanonicalMediaType, number>;
+  raw: Record<CanonicalMediaType, number>;
+}
+
+interface CsvFileInfo {
+  fullPath: string;
+  fileName: string;
+  mtimeMs: number;
+}
+
+interface RecentLogExportEntry {
+  dateKey: string;
+  typeLabel: string;
+  amountLabel: string;
+  count: number;
+  command: string;
+}
+
+interface CsvSnapshotEntry {
+  fileName: string;
+  label: string;
+  isLatest: boolean;
+}
+
+const CSV_SEARCH_DIRS = ['src/data/csvs', 'public/csvs', 'public/svgs'];
+const TYPE_ORDER: CanonicalMediaType[] = ['reading', 'listening', 'anime', 'manga', 'other'];
+const TYPE_LABELS: Record<CanonicalMediaType, string> = {
+  reading: 'Reading Time',
+  listening: 'Listening Time',
+  anime: 'Anime',
+  manga: 'Manga',
+  other: 'Other',
+};
+
+const RECENT_LOG_EXPORT_LABELS: Record<CanonicalMediaType, string> = {
+  reading: 'Reading Time (in minutes)',
+  listening: 'Listening Time (in minutes)',
+  anime: 'Anime (in episodes watched)',
+  manga: 'Manga',
+  other: 'Other',
+};
+
+const DEFAULT_MEDIA_NAME = 'N/A';
+const DEFAULT_COMMENT = 'No comment';
+
+const TYPE_COLORS: Record<CanonicalMediaType, string> = {
+  reading: 'bg-indigo-500 dark:bg-indigo-400',
+  listening: 'bg-cyan-500 dark:bg-cyan-400',
+  anime: 'bg-rose-500 dark:bg-rose-400',
+  manga: 'bg-emerald-500 dark:bg-emerald-400',
+  other: 'bg-slate-500 dark:bg-slate-400',
+};
+
+function splitCsvLine(line: string): string[] {
+  const cells: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    const next = line[i + 1];
+
+    if (char === '"' && inQuotes && next === '"') {
+      current += '"';
+      i += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (char === ',' && !inQuotes) {
+      cells.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  cells.push(current.trim());
+  return cells;
+}
+
+function normalizeMediaType(mediaType: string): CanonicalMediaType {
+  const normalized = mediaType.toLowerCase();
+  if (normalized === 'reading time') return 'reading';
+  if (normalized === 'listening time') return 'listening';
+  if (normalized === 'anime') return 'anime';
+  if (normalized === 'manga') return 'manga';
+  return 'other';
+}
+
+function startOfDay(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function dateKey(date: Date): string {
+  return startOfDay(date).toISOString().slice(0, 10);
+}
+
+function monthKey(date: Date): string {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function formatHoursAndMinutes(totalMinutes: number): string {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = Math.round(totalMinutes % 60);
+  return `${hours}h ${minutes}m`;
+}
+
+function number(value: number): string {
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 }).format(value);
+}
+
+function formatPoints(value: number): string {
+  return number(Math.round(value));
+}
+
+function addDaysUTC(date: Date, days: number): Date {
+  return new Date(date.getTime() + days * 86400000);
+}
+
+function countLogStreaks(dayKeys: Iterable<string>): { current: number; max: number } {
+  const sortedDays = [...dayKeys].sort();
+  if (sortedDays.length === 0) return { current: 0, max: 0 };
+
+  let currentRun = 1;
+  let maxRun = 1;
+
+  for (let i = 1; i < sortedDays.length; i += 1) {
+    const prev = new Date(`${sortedDays[i - 1]}T00:00:00Z`);
+    const curr = new Date(`${sortedDays[i]}T00:00:00Z`);
+    const gapDays = Math.round((curr.getTime() - prev.getTime()) / 86400000);
+
+    if (gapDays === 1) {
+      currentRun += 1;
+      if (currentRun > maxRun) maxRun = currentRun;
+      continue;
+    }
+
+    if (currentRun > maxRun) maxRun = currentRun;
+    currentRun = 1;
+  }
+
+  return { current: currentRun, max: maxRun };
+}
+
+function countGoalStreaks(dayMinutes: Map<string, number>, targetMinutes: number): { current: number; max: number } {
+  const qualifyingDays = [...dayMinutes.entries()]
+    .filter(([, minutes]) => minutes >= targetMinutes)
+    .map(([day]) => day)
+    .sort();
+
+  if (qualifyingDays.length === 0) return { current: 0, max: 0 };
+
+  let longest = 1;
+  let run = 1;
+  for (let i = 1; i < qualifyingDays.length; i += 1) {
+    const prev = new Date(`${qualifyingDays[i - 1]}T00:00:00Z`);
+    const curr = new Date(`${qualifyingDays[i]}T00:00:00Z`);
+    const gapDays = Math.round((curr.getTime() - prev.getTime()) / 86400000);
+
+    if (gapDays === 1) {
+      run += 1;
+      if (run > longest) longest = run;
+    } else {
+      run = 1;
+    }
+  }
+
+  let current = 0;
+  const today = dateKey(startOfDay(new Date()));
+  for (let cursor = today; dayMinutes.get(cursor) !== undefined && (dayMinutes.get(cursor) ?? 0) >= targetMinutes; cursor = dateKey(addDaysUTC(new Date(`${cursor}T00:00:00Z`), -1))) {
+    current += 1;
+  }
+
+  return { current, max: longest };
+}
+
+function startOfWeekMondayUTC(date: Date): Date {
+  const d = startOfDay(date);
+  const dow = d.getUTCDay();
+  return addDaysUTC(d, dow === 0 ? -6 : 1 - dow);
+}
+
+function startOfWeekSundayUTC(date: Date): Date {
+  const d = startOfDay(date);
+  const dow = d.getUTCDay();
+  return addDaysUTC(d, -dow);
+}
+
+interface HeatmapCell {
+  dateKey: string;
+  points: number;
+  inYear: boolean;
+}
+
+interface HeatmapWeek {
+  cells: HeatmapCell[];
+}
+
+interface ReadingGoalDay {
+  label: string;
+  dateKey: string;
+  minutes: number;
+  met: boolean;
+  isToday: boolean;
+  isFuture: boolean;
+  faceSrc: string;
+  fillPct: number;
+  barColor: string;
+}
+
+interface ReadingGoalWeek {
+  label: string;
+  totalMinutes: number;
+  days: ReadingGoalDay[];
+}
+
+function buildGithubStyleYearHeatmap(
+  year: number,
+  dayPoints: Map<string, number>,
+): { weeks: HeatmapWeek[]; maxPoints: number; monthLabels: (string | null)[]; monthStarts: boolean[] } {
+  const jan1 = new Date(Date.UTC(year, 0, 1));
+  const dec31 = new Date(Date.UTC(year, 11, 31));
+  const gridStart = startOfWeekMondayUTC(jan1);
+  const lastWeekStart = startOfWeekMondayUTC(dec31);
+
+  const weeks: HeatmapWeek[] = [];
+  let maxPoints = 0;
+
+  for (let cursor = gridStart.getTime(); cursor <= lastWeekStart.getTime(); cursor += 7 * 86400000) {
+    const weekStart = new Date(cursor);
+    const cells: HeatmapCell[] = [];
+    for (let dow = 0; dow < 7; dow += 1) {
+      const d = addDaysUTC(weekStart, dow);
+      const inYear = d.getUTCFullYear() === year;
+      const key = dateKey(d);
+      const points = inYear ? (dayPoints.get(key) ?? 0) : 0;
+      if (inYear && points > maxPoints) maxPoints = points;
+      cells.push({ dateKey: key, points, inYear });
+    }
+    weeks.push({ cells });
+  }
+
+  const monthLabels: (string | null)[] = [];
+  const monthStarts: boolean[] = [];
+  let previousMonth: number | null = null;
+
+  for (const week of weeks) {
+    const firstInYearCell = week.cells.find((cell) => cell.inYear);
+    if (!firstInYearCell) {
+      monthLabels.push(null);
+      monthStarts.push(false);
+      continue;
+    }
+
+    const firstDate = new Date(`${firstInYearCell.dateKey}T12:00:00Z`);
+    const month = firstDate.getUTCMonth();
+    const isMonthStartWeek = previousMonth === null || month !== previousMonth;
+    monthStarts.push(isMonthStartWeek);
+    monthLabels.push(isMonthStartWeek ? firstDate.toLocaleString('en-US', { month: 'short' }) : null);
+    previousMonth = month;
+  }
+
+  return { weeks, maxPoints: maxPoints || 1, monthLabels, monthStarts };
+}
+
+async function getCsvFiles() {
+  const candidates: CsvFileInfo[] = [];
+
+  for (const relativeDir of CSV_SEARCH_DIRS) {
+    const absoluteDir = path.resolve(relativeDir);
+    try {
+      const entries = await fs.readdir(absoluteDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.csv')) continue;
+        const fullPath = path.join(absoluteDir, entry.name);
+        const stats = await fs.stat(fullPath);
+        candidates.push({ fullPath, fileName: entry.name, mtimeMs: stats.mtimeMs });
+      }
+    } catch {
+      // Directory doesn't exist yet: skip silently.
+    }
+  }
+
+  candidates.sort((a, b) => a.mtimeMs - b.mtimeMs || a.fileName.localeCompare(b.fileName));
+  return candidates;
+}
+
+async function loadImmersionLogsFromCsv(csvPath: string) {
+  const rawCsv = await fs.readFile(csvPath, 'utf8');
+  const lines = rawCsv.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (lines.length <= 1) return [] as ImmersionLog[];
+
+  const headers = splitCsvLine(lines[0]);
+  const mediaTypeIdx = headers.indexOf('Media Type');
+  const amountIdx = headers.indexOf('Amount Logged');
+  const pointsIdx = headers.indexOf('Points Received');
+  const dateIdx = headers.indexOf('Log Date');
+  const logIdIdx = headers.indexOf('Log ID');
+  const mediaNameIdx = headers.indexOf('Media Name');
+  const commentIdx = headers.indexOf('Comment');
+
+  const logs: ImmersionLog[] = [];
+  for (const line of lines.slice(1)) {
+    const cells = splitCsvLine(line);
+    const logId = Number(cells[logIdIdx] ?? 0);
+    const mediaType = cells[mediaTypeIdx] ?? '';
+    const amount = Number(cells[amountIdx] ?? 0);
+    const points = Number(cells[pointsIdx] ?? 0);
+    const logDateRaw = cells[dateIdx] ?? '';
+    const mediaName = cells[mediaNameIdx] ?? DEFAULT_MEDIA_NAME;
+    const comment = cells[commentIdx] ?? DEFAULT_COMMENT;
+    const logDayKey = logDateRaw.split(' ')[0] ?? '';
+    const isDayKeyValid = /^\d{4}-\d{2}-\d{2}$/.test(logDayKey);
+    const parsedDate = new Date(`${logDayKey}T00:00:00Z`);
+
+    if (
+      !Number.isFinite(logId) ||
+      !mediaType ||
+      Number.isNaN(amount) ||
+      Number.isNaN(points) ||
+      !isDayKeyValid ||
+      Number.isNaN(parsedDate.getTime())
+    ) {
+      continue;
+    }
+
+    logs.push({
+      logId,
+      mediaType,
+      canonicalType: normalizeMediaType(mediaType),
+      amount,
+      points,
+      date: parsedDate,
+      logDayKey,
+      mediaName,
+      comment,
+    });
+  }
+
+  logs.sort((a, b) => a.date.getTime() - b.date.getTime());
+  return logs;
+}
+
+function mergeOptionalField(current: string | null, incoming: string | null): string | null {
+  if (current === null) return incoming;
+  if (incoming === null) return current;
+  return current === incoming ? current : null;
+}
+
+function formatRecentAmountLabel(type: CanonicalMediaType, amount: number): string {
+  const rounded = Math.round(amount);
+  if (type === 'anime') return `${rounded} ep`;
+  if (type === 'manga') return `${rounded} pages`;
+  return `${rounded}m`;
+}
+
+const todayKey = dateKey(new Date());
+
+function buildRecentExportCommand(
+  type: CanonicalMediaType,
+  amount: number,
+  dateKeyValue: string,
+  name: string | null,
+  comment: string | null,
+): string {
+  const parts = [`/log`, `media_type:${RECENT_LOG_EXPORT_LABELS[type]}`, `amount:${Math.round(amount)}`];
+  if (name && name !== DEFAULT_MEDIA_NAME) parts.push(`name:${name}`);
+  if (comment && comment !== DEFAULT_COMMENT) parts.push(`comment:${comment}`);
+  if (dateKeyValue !== todayKey) parts.push(`backfill_date:${dateKeyValue}`);
+  return parts.join(' ');
+}
+
+function buildRecentLogEntries(oldestLogs: ImmersionLog[], latestLogs: ImmersionLog[]): RecentLogExportEntry[] {
+  const oldestIds = new Set(oldestLogs.map((log) => log.logId));
+  const recentLogs = latestLogs.filter((log) => !oldestIds.has(log.logId));
+  if (!recentLogs.length) return [];
+
+  const grouped = new Map<
+    string,
+    {
+      dateKey: string;
+      type: CanonicalMediaType;
+      typeLabel: string;
+      amount: number;
+      count: number;
+      dateMs: number;
+      name: string | null;
+      comment: string | null;
+    }
+  >();
+
+  for (const log of recentLogs) {
+    const key = `${log.logDayKey}|${log.canonicalType}`;
+    const incomingName = log.mediaName === DEFAULT_MEDIA_NAME ? null : log.mediaName;
+    const incomingComment = log.comment === DEFAULT_COMMENT ? null : log.comment;
+    const existing = grouped.get(key);
+
+    if (!existing) {
+      grouped.set(key, {
+        dateKey: log.logDayKey,
+        type: log.canonicalType,
+        typeLabel: TYPE_LABELS[log.canonicalType],
+        amount: log.amount,
+        count: 1,
+        dateMs: log.date.getTime(),
+        name: incomingName,
+        comment: incomingComment,
+      });
+      continue;
+    }
+
+    existing.amount += log.amount;
+    existing.count += 1;
+    existing.dateMs = Math.max(existing.dateMs, log.date.getTime());
+    existing.name = mergeOptionalField(existing.name, incomingName);
+    existing.comment = mergeOptionalField(existing.comment, incomingComment);
+  }
+
+  return [...grouped.values()]
+    .sort((a, b) => b.dateMs - a.dateMs || a.typeLabel.localeCompare(b.typeLabel))
+    .map((group) => ({
+      dateKey: group.dateKey,
+      typeLabel: group.typeLabel,
+      amountLabel: formatRecentAmountLabel(group.type, group.amount),
+      count: group.count,
+      command: buildRecentExportCommand(group.type, group.amount, group.dateKey, group.name, group.comment),
+    }));
+}
+
+function formatCsvSnapshotLabel(mtimeMs: number): string {
+  return new Date(mtimeMs).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+const csvFiles = await getCsvFiles();
+const oldestCsv = csvFiles[0] ?? null;
+const latestCsv = csvFiles[csvFiles.length - 1] ?? null;
+const logs = latestCsv ? await loadImmersionLogsFromCsv(latestCsv.fullPath) : [];
+const oldestLogs = oldestCsv && latestCsv && oldestCsv.fullPath !== latestCsv.fullPath ? await loadImmersionLogsFromCsv(oldestCsv.fullPath) : [];
+const recentLogEntries = oldestLogs.length ? buildRecentLogEntries(oldestLogs, logs) : [];
+const csvSnapshots: CsvSnapshotEntry[] = csvFiles.map((file, index) => ({
+  fileName: file.fileName,
+  label: formatCsvSnapshotLabel(file.mtimeMs),
+  isLatest: index === csvFiles.length - 1,
+}));
+
+const totalPoints = logs.reduce((sum, log) => sum + log.points, 0);
+const firstDate = logs.length ? logs[0].date : null;
+const lastDate = logs.length ? logs[logs.length - 1].date : null;
+const nextLogId = logs.length ? Math.max(...logs.map((log) => log.logId)) + 1 : 1;
+const logDefaults = {
+  reading: { logId: nextLogId, mediaName: DEFAULT_MEDIA_NAME, comment: DEFAULT_COMMENT, amount: 60 },
+  listening: { logId: nextLogId, mediaName: DEFAULT_MEDIA_NAME, comment: DEFAULT_COMMENT, amount: 60 },
+  anime: { logId: nextLogId, mediaName: DEFAULT_MEDIA_NAME, comment: DEFAULT_COMMENT, amount: 1 },
+} as const;
+
+const byDay = new Map<string, number>();
+const byMonth = new Map<string, MonthBucket>();
+const byYear = new Map<number, { points: number; readingMinutes: number; listeningMinutes: number; animeEpisodes: number; mangaPages: number }>();
+const readingByDay = new Map<string, number>();
+const unknownTypes = new Set<string>();
+
+for (const log of logs) {
+  const day = log.logDayKey;
+  byDay.set(day, (byDay.get(day) ?? 0) + log.points);
+  if (log.canonicalType === 'reading') readingByDay.set(day, (readingByDay.get(day) ?? 0) + log.amount);
+
+  const month = log.logDayKey.slice(0, 7);
+  if (!byMonth.has(month)) {
+    byMonth.set(month, {
+      key: month,
+      label: new Date(`${month}-01T00:00:00Z`).toLocaleString('en-US', { month: 'short', year: 'numeric' }),
+      totals: { reading: 0, listening: 0, anime: 0, manga: 0, other: 0 },
+      raw: { reading: 0, listening: 0, anime: 0, manga: 0, other: 0 },
+    });
+  }
+
+  const monthBucket = byMonth.get(month)!;
+  monthBucket.totals[log.canonicalType] += log.points;
+  monthBucket.raw[log.canonicalType] += log.amount;
+
+  const year = Number(log.logDayKey.slice(0, 4));
+  if (!byYear.has(year)) {
+    byYear.set(year, { points: 0, readingMinutes: 0, listeningMinutes: 0, animeEpisodes: 0, mangaPages: 0 });
+  }
+  const yearBucket = byYear.get(year)!;
+  yearBucket.points += log.points;
+  if (log.canonicalType === 'reading') yearBucket.readingMinutes += log.amount;
+  else if (log.canonicalType === 'listening') yearBucket.listeningMinutes += log.amount;
+  else if (log.canonicalType === 'anime') yearBucket.animeEpisodes += log.amount;
+  else if (log.canonicalType === 'manga') yearBucket.mangaPages += log.amount;
+  else unknownTypes.add(log.mediaType);
+}
+
+const months = [...byMonth.values()].sort((a, b) => a.key.localeCompare(b.key));
+const yearly = [...byYear.entries()].sort((a, b) => b[0] - a[0]);
+const maxMonthPoints = Math.max(...months.map((month) => TYPE_ORDER.reduce((sum, type) => sum + month.totals[type], 0)), 1);
+const monthRows = [...months]
+  .sort((a, b) => b.key.localeCompare(a.key))
+  .map((month) => {
+    const monthTotal = Math.round(TYPE_ORDER.reduce((sum, type) => sum + month.totals[type], 0));
+    const barWidth = `${(monthTotal / maxMonthPoints) * 100}%`;
+    const hoverDetails = [
+      `${month.label}`,
+      `Total points: ${formatPoints(monthTotal)}`,
+      `Reading: ${number(month.raw.reading)} min (${formatPoints(month.totals.reading)} pts)`,
+      `Listening: ${number(month.raw.listening)} min (${formatPoints(month.totals.listening)} pts)`,
+      `Anime: ${number(month.raw.anime)} eps (${formatPoints(month.totals.anime)} pts)`,
+      `Manga: ${number(month.raw.manga)} pages (${formatPoints(month.totals.manga)} pts)`,
+      `Other: ${number(month.raw.other)} units (${formatPoints(month.totals.other)} pts)`,
+    ].join('\n');
+    const barSegments = TYPE_ORDER.flatMap((type) => {
+      if (monthTotal === 0 || month.totals[type] === 0) return [];
+      return [{ color: TYPE_COLORS[type], pct: (month.totals[type] / monthTotal) * 100 }];
+    });
+
+    return { key: month.key, label: month.label, total: monthTotal, barWidth, hoverDetails, barSegments };
+  });
+
+const weekDayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const READING_GOAL_MINUTES = 210;
+const READING_GOAL_MAX_MINUTES = 16 * 60;
+const READING_GOAL_BREAKPOINT_MINUTES = 210;
+const READING_GOAL_SECOND_HALF_MINUTES = READING_GOAL_MAX_MINUTES - READING_GOAL_BREAKPOINT_MINUTES;
+const READING_GOAL_EXP_STRENGTH = 4.2;
+const happyFaceSrcs = [
+  '/reading-faces/happy-1.webp',
+  '/reading-faces/happy-2.webp',
+  '/reading-faces/happy-3.webp',
+];
+const sadFaceSrc = '/reading-faces/sad.webp';
+const currentPendingFaceSrc = '/reading-faces/current-pending.webp';
+const futureFaceSrc = '/reading-faces/future.webp';
+const HAPPY_FACE_SEED = 'risu-tracker-reading-faces-v2';
+
+function hashString(input: string): number {
+  let hash = 2166136261;
+  for (let idx = 0; idx < input.length; idx += 1) {
+    hash ^= input.charCodeAt(idx);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function getHappyFacePalette() {
+  const faces = [...happyFaceSrcs];
+  let state = hashString(HAPPY_FACE_SEED) || 1;
+
+  for (let idx = faces.length - 1; idx > 0; idx -= 1) {
+    state = (state ^ (state >>> 15)) >>> 0;
+    state = Math.imul(state, 2246822519) + 1;
+    state >>>= 0;
+    const swapIndex = state % (idx + 1);
+    [faces[idx], faces[swapIndex]] = [faces[swapIndex], faces[idx]];
+  }
+
+  return faces;
+}
+
+function pickReadingFace(dateKeyValue: string) {
+  const palette = getHappyFacePalette();
+  return palette[hashString(`${HAPPY_FACE_SEED}:${dateKeyValue}`) % palette.length];
+}
+
+function getReadingGoalFillPct(minutes: number) {
+  if (minutes <= READING_GOAL_BREAKPOINT_MINUTES) {
+    return (minutes / READING_GOAL_BREAKPOINT_MINUTES) * 50;
+  }
+
+  const t = Math.min((minutes - READING_GOAL_BREAKPOINT_MINUTES) / READING_GOAL_SECOND_HALF_MINUTES, 1);
+  const eased = (1 - Math.exp(-READING_GOAL_EXP_STRENGTH * t)) / (1 - Math.exp(-READING_GOAL_EXP_STRENGTH));
+  return 50 + eased * 50;
+}
+
+function getReadingGoalBarColor(minutes: number) {
+  if (minutes < READING_GOAL_BREAKPOINT_MINUTES) {
+    const pct = minutes / READING_GOAL_BREAKPOINT_MINUTES;
+    const hue = 4 + pct * 48;
+    const lightness = 55 + pct * 6;
+    return `hsl(${hue.toFixed(1)} 92% ${lightness.toFixed(1)}%)`;
+  }
+
+  const pct = Math.min((minutes - READING_GOAL_BREAKPOINT_MINUTES) / READING_GOAL_SECOND_HALF_MINUTES, 1);
+  const hue = 156 + pct * 24;
+  const saturation = 70 - pct * 6;
+  const lightness = 48 - pct * 2;
+  return `hsl(${hue.toFixed(1)} ${saturation.toFixed(1)}% ${lightness.toFixed(1)}%)`;
+}
+
+function buildReadingGoalWeek(start: Date, label: string) {
+  const todayKey = dateKey(startOfDay(new Date()));
+  const days = weekDayLabels.map((dayLabel, idx) => {
+    const date = addDaysUTC(start, idx);
+    const key = dateKey(date);
+    const minutes = readingByDay.get(key) ?? 0;
+    const met = minutes >= READING_GOAL_MINUTES;
+    const isToday = key === todayKey;
+    const isFuture = key > todayKey;
+    const faceSrc = isFuture ? futureFaceSrc : met ? pickReadingFace(key) : isToday ? currentPendingFaceSrc : sadFaceSrc;
+    return {
+      label: dayLabel,
+      dateKey: key,
+      minutes,
+      met,
+      isToday,
+      isFuture,
+      faceSrc,
+      fillPct: Math.min(getReadingGoalFillPct(minutes), 100),
+      barColor: getReadingGoalBarColor(minutes),
+    };
+  });
+
+  return {
+    label,
+    totalMinutes: days.reduce((sum, day) => sum + day.minutes, 0),
+    days,
+  };
+}
+
+const currentWeekStart = startOfWeekMondayUTC(new Date());
+const lastWeekStart = addDaysUTC(currentWeekStart, -7);
+const readingGoalWeeks = [
+  buildReadingGoalWeek(currentWeekStart, 'This week'),
+  buildReadingGoalWeek(lastWeekStart, 'Last week'),
+];
+const readingGoalStreaks = countGoalStreaks(readingByDay, READING_GOAL_MINUTES);
+
+const readingMinutesTotal = logs
+  .filter((log) => log.canonicalType === 'reading')
+  .reduce((sum, log) => sum + log.amount, 0);
+const listeningMinutesTotal = logs
+  .filter((log) => log.canonicalType === 'listening')
+  .reduce((sum, log) => sum + log.amount, 0);
+const animeEpisodesTotal = logs
+  .filter((log) => log.canonicalType === 'anime')
+  .reduce((sum, log) => sum + log.amount, 0);
+const mangaPagesTotal = logs
+  .filter((log) => log.canonicalType === 'manga')
+  .reduce((sum, log) => sum + log.amount, 0);
+
+const convertedAnimeMinutes = animeEpisodesTotal * 20;
+const convertedMangaMinutes = mangaPagesTotal * (60 / 200);
+const totalConvertedMinutes = readingMinutesTotal + listeningMinutesTotal + convertedAnimeMinutes + convertedMangaMinutes;
+
+const activeDays = [...byDay.values()].filter((points) => points > 0).length;
+const avgPointsPerActiveDay = activeDays ? totalPoints / activeDays : 0;
+const bestDayEntry = [...byDay.entries()].sort((a, b) => b[1] - a[1])[0] ?? null;
+const monthsTracked = months.length;
+const { current: currentStreak, max: activeStreak } = countLogStreaks(byDay.keys());
+
+const calendarYear = new Date().getUTCFullYear();
+const maxDataYear = byYear.size ? Math.max(...byYear.keys()) : calendarYear;
+const focusYear = Math.max(calendarYear, maxDataYear);
+
+const yearsWithData = new Set<number>();
+for (const key of byDay.keys()) {
+  yearsWithData.add(Number(key.slice(0, 4)));
+}
+
+const focusHeatmap = buildGithubStyleYearHeatmap(focusYear, byDay);
+const otherHeatmapYears = [...yearsWithData].filter((y) => y !== focusYear).sort((a, b) => b - a);
+const otherHeatmaps = otherHeatmapYears.map((y) => {
+  const built = buildGithubStyleYearHeatmap(y, byDay);
+  return {
+    year: y,
+    weeks: built.weeks,
+    monthLabels: built.monthLabels,
+    monthStarts: built.monthStarts,
+    maxPoints: built.maxPoints,
+  };
+});
+---
+
+<BaseLayout title="Risu Tracker">
+  <section class="space-y-10">
+    <div class="space-y-3">
+      <h1>Immersion Dashboard</h1>
+      {
+        unknownTypes.size > 0 && (
+          <p class="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+            Found unclassified media type(s): {[...unknownTypes].join(', ')}. Tell me if these should be mapped to
+            specific units.
+          </p>
+        )
+      }
+    </div>
+
+    <ImmersionLogDialog
+      client:load
+      submitUrl="/api/immersion-log"
+      defaults={logDefaults}
+      recentLogs={recentLogEntries}
+      csvSnapshots={csvSnapshots}
+    />
+
+    <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <article class="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+        <p class="text-sm text-slate-500 dark:text-slate-400">Current streak</p>
+        <div class="mt-1 flex items-center gap-2">
+          <span aria-hidden="true" class="-translate-y-0.5 text-3xl leading-none text-amber-500 drop-shadow-sm">🔥</span>
+          <p class="text-3xl font-semibold leading-none">{number(currentStreak)}<span class="text-base font-medium text-slate-500 dark:text-slate-400"> days</span></p>
+        </div>
+      </article>
+      <article class="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+        <p class="text-sm text-slate-500 dark:text-slate-400">Longest streak</p>
+        <div class="mt-1 flex items-center gap-2">
+          <span
+            aria-hidden="true"
+            class:list={[
+              '-translate-y-0.5 text-3xl leading-none drop-shadow-sm',
+              currentStreak === activeStreak ? 'text-amber-500' : 'text-slate-400 grayscale opacity-75',
+            ]}
+          >
+            🔥
+          </span>
+          <p class="text-3xl font-semibold leading-none">{number(activeStreak)}<span class="text-base font-medium text-slate-500 dark:text-slate-400"> days</span></p>
+        </div>
+      </article>
+      <article class="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+        <p class="text-sm text-slate-500 dark:text-slate-400">Total converted immersion time</p>
+        <p class="mt-2 text-3xl font-semibold">{formatHoursAndMinutes(totalConvertedMinutes)}</p>
+      </article>
+      <article class="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+        <p class="text-sm text-slate-500 dark:text-slate-400">Total points</p>
+        <p class="mt-2 text-3xl font-semibold">{formatPoints(totalPoints)}</p>
+      </article>
+    </section>
+
+    <section class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <div class="flex items-end justify-between gap-3">
+        <div>
+          <h2 class="text-xl font-semibold">Reading Goals</h2>
+          <div class="mt-3 grid grid-cols-1 gap-2 text-sm sm:grid-cols-3">
+            <div class="rounded-lg bg-slate-50 px-3 py-2 dark:bg-slate-950/20">
+              <p class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Target</p>
+              <p class="mt-1 font-semibold text-slate-900 dark:text-slate-100">
+                {formatHoursAndMinutes(READING_GOAL_MINUTES)}<span class="font-medium text-slate-500 dark:text-slate-400"> / day</span>
+              </p>
+            </div>
+            <div class="rounded-lg bg-slate-50 px-3 py-2 dark:bg-slate-950/20">
+              <p class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Current streak</p>
+              <p class="mt-1 font-semibold text-slate-900 dark:text-slate-100">
+                {number(readingGoalStreaks.current)}<span class="font-medium text-slate-500 dark:text-slate-400"> days</span>
+              </p>
+            </div>
+            <div class="rounded-lg bg-slate-50 px-3 py-2 dark:bg-slate-950/20">
+              <p class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Longest streak</p>
+              <p class="mt-1 font-semibold text-slate-900 dark:text-slate-100">
+                {number(readingGoalStreaks.max)}<span class="font-medium text-slate-500 dark:text-slate-400"> days</span>
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-4 space-y-4">
+        {readingGoalWeeks.map((week) => (
+          <div class="space-y-2">
+            <div class="flex items-center justify-between gap-3 text-sm text-slate-500 dark:text-slate-400">
+              <p class="font-medium text-slate-700 dark:text-slate-200">{week.label}</p>
+              <p>{formatHoursAndMinutes(week.totalMinutes)}</p>
+            </div>
+
+            <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-7">
+              {week.days.map((day) => (
+                <div class:list={[
+                  'rounded-lg border border-slate-200 bg-slate-50 p-3 shadow-sm shadow-slate-950/5 dark:border-slate-800 dark:bg-slate-950/20 dark:shadow-none',
+                  day.isFuture && 'opacity-60 saturate-0',
+                  day.isToday && 'ring-1 ring-sky-400/60 dark:ring-sky-300/40',
+                ]}>
+                  <div class="flex items-start justify-between gap-2">
+                    <div>
+                      <p class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">{day.label}</p>
+                      <p class:list={['mt-1 text-sm font-medium', day.isFuture ? 'text-slate-500 dark:text-slate-500' : 'text-slate-900 dark:text-slate-100']}>{formatHoursAndMinutes(day.minutes)}</p>
+                    </div>
+                    <img
+                      src={day.faceSrc}
+                      alt={day.isFuture ? 'Future day' : day.met ? 'Goal met' : day.isToday ? 'Goal not yet met today' : 'Goal not met'}
+                      class:list={['h-9 w-9 shrink-0 select-none rounded-full', day.isFuture && 'opacity-70']}
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  </div>
+
+                  <div class="mt-3 overflow-visible">
+                    <div class="relative h-2 overflow-visible rounded-full bg-slate-200 dark:bg-slate-800">
+                      <div
+                        class:list={[
+                          'absolute left-0 top-0 h-full rounded-full transition-[width] duration-300 ease-out',
+                          day.isFuture ? 'bg-slate-400/70 dark:bg-slate-600/70' : '' ,
+                        ]}
+                        style={`width: ${Math.max(day.isFuture ? 8 : 8, day.fillPct)}%; background-color: ${day.isFuture ? 'rgba(148,163,184,0.72)' : day.barColor};`}
+                      />
+                      {day.isToday && (
+                        <div
+                          class="absolute inset-0 rounded-full ring-1 ring-sky-400/35 dark:ring-sky-300/25"
+                          aria-hidden="true"
+                        />
+                      )}
+                      <div
+                        class="absolute left-1/2 top-1/2 z-10 h-4 w-[1.5px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-slate-900/35 shadow-[0_0_0_1px_rgba(255,255,255,0.35)] dark:bg-white/50 dark:shadow-[0_0_0_1px_rgba(15,23,42,0.45)]"
+                        aria-hidden="true"
+                      />
+                    </div>
+                  </div>
+
+                  <p class:list={['mt-2 text-[11px]', day.isFuture ? 'text-slate-400 dark:text-slate-500' : 'text-slate-500 dark:text-slate-400']}>
+                    {day.isFuture ? 'Not yet today' : day.met ? 'Goal reached' : `${Math.round(day.minutes)} / ${READING_GOAL_MINUTES} min`}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <section class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <div class="mb-4">
+        <h2 class="text-xl font-semibold">Heatmap</h2>
+      </div>
+      <ImmersionHeatmaps
+        client:load
+        focus={{
+          year: focusYear,
+          weeks: focusHeatmap.weeks,
+          monthLabels: focusHeatmap.monthLabels,
+          monthStarts: focusHeatmap.monthStarts,
+          maxPoints: focusHeatmap.maxPoints,
+        }}
+        otherYears={otherHeatmaps}
+      />
+    </section>
+
+    <section class="space-y-4 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <h2 class="text-xl font-semibold">Monthly Breakdown</h2>
+        <div class="flex flex-wrap items-center gap-3 text-sm">
+          {TYPE_ORDER.map((type) => (
+            <span class="inline-flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
+              <span class:list={['h-2.5 w-2.5 rounded-full', TYPE_COLORS[type]]} />
+              {TYPE_LABELS[type]}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <MonthlyBreakdown client:load months={monthRows} visibleCount={6} />
+    </section>
+
+    <section class="grid gap-6 lg:grid-cols-2">
+      <article class="space-y-3 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+        <h2 class="text-xl font-semibold">Overall Raw Totals</h2>
+        <ul class="space-y-2 text-slate-700 dark:text-slate-200">
+          <li>Reading time: {number(readingMinutesTotal)} min ({formatHoursAndMinutes(readingMinutesTotal)})</li>
+          <li>Listening time: {number(listeningMinutesTotal)} min ({formatHoursAndMinutes(listeningMinutesTotal)})</li>
+          <li>Anime: {number(animeEpisodesTotal)} episodes (≈ {formatHoursAndMinutes(convertedAnimeMinutes)})</li>
+          <li>Manga: {number(mangaPagesTotal)} pages (≈ {formatHoursAndMinutes(convertedMangaMinutes)})</li>
+        </ul>
+      </article>
+
+      <article class="space-y-3 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+        <h2 class="text-xl font-semibold">By Year</h2>
+        <div class="space-y-3">
+          {yearly.map(([year, values]) => {
+            const convertedMinutes =
+              values.readingMinutes +
+              values.listeningMinutes +
+              values.animeEpisodes * 20 +
+              values.mangaPages * (60 / 200);
+
+            return (
+              <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+                <p class="text-base font-semibold">{year}</p>
+                <p class="text-sm text-slate-600 dark:text-slate-300">{formatPoints(values.points)} points</p>
+                <p class="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                  {formatHoursAndMinutes(convertedMinutes)} total
+                  · {number(values.readingMinutes)} read min
+                  · {number(values.listeningMinutes)} listen min
+                  · {number(values.animeEpisodes)} eps
+                  · {number(values.mangaPages)} pages
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      </article>
+    </section>
+
+    <section class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <h2 class="text-xl font-semibold">Interesting Extras</h2>
+      <ul class="mt-3 space-y-2 text-slate-700 dark:text-slate-200">
+        <li>Tracked period: {firstDate ? dateKey(firstDate) : 'N/A'} → {lastDate ? dateKey(lastDate) : 'N/A'}</li>
+        <li>Months tracked: {monthsTracked}</li>
+        <li>Active immersion days: {activeDays}</li>
+        <li>Best day: {bestDayEntry ? `${bestDayEntry[0]} · ${formatPoints(bestDayEntry[1])} pts` : 'No data'}</li>
+        <li>Average per active day: {formatPoints(avgPointsPerActiveDay)} pts</li>
+        <li>Average points per month: {monthsTracked ? formatPoints(totalPoints / monthsTracked) : '0'}</li>
+      </ul>
+    </section>
+  </section>
+</BaseLayout>
