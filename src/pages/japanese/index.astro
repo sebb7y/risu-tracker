@@ -3,6 +3,8 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
 import ImmersionHeatmaps from '../../components/svelte/ImmersionHeatmaps.svelte';
 import ImmersionLogDialog from '../../components/svelte/ImmersionLogDialog.svelte';
 import MonthlyBreakdown from '../../components/svelte/MonthlyBreakdown.svelte';
+import CsvImportDialog from '../../components/svelte/CsvImportDialog.svelte';
+import { getImmersionLogs } from '../../lib/db';
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -469,17 +471,9 @@ function formatCsvSnapshotLabel(mtimeMs: number): string {
   });
 }
 
-const csvFiles = await getCsvFiles();
-const oldestCsv = csvFiles[0] ?? null;
-const latestCsv = csvFiles[csvFiles.length - 1] ?? null;
-const logs = latestCsv ? await loadImmersionLogsFromCsv(latestCsv.fullPath) : [];
-const oldestLogs = oldestCsv && latestCsv && oldestCsv.fullPath !== latestCsv.fullPath ? await loadImmersionLogsFromCsv(oldestCsv.fullPath) : [];
-const recentLogEntries = oldestLogs.length ? buildRecentLogEntries(oldestLogs, logs) : [];
-const csvSnapshots: CsvSnapshotEntry[] = csvFiles.map((file, index) => ({
-  fileName: file.fileName,
-  label: formatCsvSnapshotLabel(file.mtimeMs),
-  isLatest: index === csvFiles.length - 1,
-}));
+const logs = getImmersionLogs();
+const recentLogEntries: RecentLogExportEntry[] = [];
+const csvSnapshots: CsvSnapshotEntry[] = [];
 
 const totalPoints = logs.reduce((sum, log) => sum + log.points, 0);
 const firstDate = logs.length ? logs[0].date : null;
@@ -729,6 +723,7 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
       recentLogs={recentLogEntries}
       csvSnapshots={csvSnapshots}
     />
+    <CsvImportDialog client:load />
 
     <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
       <article class="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
