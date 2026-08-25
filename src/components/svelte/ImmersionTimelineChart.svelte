@@ -33,10 +33,12 @@
   let mode: Mode = 'cumulative';
   let splitAnkiByDeck = false;
   let minimumHours = 0;
+  let showPercentages = true;
   let componentActions: Record<string, ComponentAction> = {};
   let mergeTargets: Record<string, string> = {};
   let compounds: ChartSeries[] = [];
   let compoundName = '';
+  let hydrated = false;
   let enabled: Record<string, boolean> = {};
   let container: HTMLDivElement;
   let hoveredIndex: number | null = null;
@@ -56,6 +58,7 @@
   $: chartSeries = prepared.series;
   $: chart = buildChart(prepared.days, chartSeries, scale, mode);
   $: hoveredDay = hoveredIndex === null ? null : prepared.days[hoveredIndex] ?? null;
+  $: hoveredTotal = hoveredIndex === null || !chart.rows[hoveredIndex] ? 0 : chart.rows[hoveredIndex].values.reduce((total, value) => total + value, 0);
 
   onMount(() => {
     const resize = () => {
@@ -64,8 +67,29 @@
     resize();
     const observer = new ResizeObserver(resize);
     if (container) observer.observe(container);
+    try {
+      const saved = JSON.parse(window.localStorage.getItem('risu-timeline-config') ?? '{}') as {
+        range?: Range; mode?: Mode; splitAnkiByDeck?: boolean; minimumHours?: number; showPercentages?: boolean;
+        componentActions?: Record<string, ComponentAction>; mergeTargets?: Record<string, string>; compounds?: ChartSeries[];
+      };
+      if (saved.range) range = saved.range;
+      if (saved.mode) mode = saved.mode;
+      if (typeof saved.splitAnkiByDeck === 'boolean') splitAnkiByDeck = saved.splitAnkiByDeck;
+      if (typeof saved.minimumHours === 'number') minimumHours = saved.minimumHours;
+      if (typeof saved.showPercentages === 'boolean') showPercentages = saved.showPercentages;
+      if (saved.componentActions) componentActions = saved.componentActions;
+      if (saved.mergeTargets) mergeTargets = saved.mergeTargets;
+      if (saved.compounds) compounds = saved.compounds;
+    } catch {
+      // Ignore malformed local configuration.
+    }
+    hydrated = true;
     return () => observer.disconnect();
   });
+
+  $: if (hydrated) {
+    window.localStorage.setItem('risu-timeline-config', JSON.stringify({ range, mode, splitAnkiByDeck, minimumHours, showPercentages, componentActions, mergeTargets, compounds }));
+  }
 
   function getVisibleDays(input: ChartDay[], selectedRange: Range): ChartDay[] {
     if (selectedRange === 'all') return input;
@@ -255,7 +279,7 @@
         </div>
 
         <div class="grid gap-2 sm:grid-cols-2">
-          <label class="space-y-1"><span class="block font-semibold text-slate-800 dark:text-slate-100">Y-axis</span><select bind:value={scale} class="w-full rounded-lg border border-slate-200 bg-transparent px-2 py-2 dark:border-slate-700"><option value="hours">Hours equivalent</option><option value="points">Points</option></select></label>
+          <label class="space-y-1"><span class="block font-semibold text-slate-800 dark:text-slate-100">Y-axis</span><p class="rounded-lg border border-slate-200 px-2 py-2 text-slate-600 dark:border-slate-700 dark:text-slate-300">Hours equivalent</p></label>
           <label class="space-y-1"><span class="block font-semibold text-slate-800 dark:text-slate-100">Chart mode</span><select bind:value={mode} class="w-full rounded-lg border border-slate-200 bg-transparent px-2 py-2 dark:border-slate-700"><option value="cumulative">Cumulative stacked</option><option value="daily">Daily stacked</option></select></label>
         </div>
 
@@ -264,6 +288,7 @@
         {/if}
 
         <label class="flex items-center gap-2"><span>Merge components below</span><input bind:value={minimumHours} type="number" min="0" step="0.5" class="w-16 rounded-lg border border-slate-200 bg-transparent px-2 py-1.5 text-right dark:border-slate-700" /><span>hours into Other</span></label>
+        <label class="flex items-center gap-2"><input type="checkbox" bind:checked={showPercentages} /> Show percentages in hover details</label>
 
         <div class="border-t border-slate-200 pt-3 dark:border-slate-700">
           <p class="font-semibold text-slate-800 dark:text-slate-100">Component configuration</p>
@@ -327,9 +352,10 @@
       {#if hoveredDay && hoveredIndex !== null}
         <div class="pointer-events-none absolute right-3 top-3 w-52 rounded-lg border border-slate-200 bg-white/95 p-3 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-900/95">
           <p class="font-semibold text-slate-900 dark:text-slate-100">{formatDate(hoveredDay.date)}</p>
+          <p class="mt-1 border-b border-slate-200 pb-2 text-sm font-semibold text-slate-900 dark:border-slate-700 dark:text-slate-100">Total · {formatValue(hoveredTotal)}</p>
           <div class="mt-2 space-y-1">
             {#each chartSeries as item, index}
-              <div class="flex items-center justify-between gap-3 text-slate-600 dark:text-slate-300"><span class="flex items-center gap-1.5"><span class="h-2 w-2 rounded-full" style={`background:${item.color}`} />{item.label}</span><span class="tabular-nums">{formatValue(chart.rows[hoveredIndex].values[index])}</span></div>
+              <div class="flex items-center justify-between gap-3 text-slate-600 dark:text-slate-300"><span class="flex min-w-0 items-center gap-1.5 truncate"><span class="h-2 w-2 shrink-0 rounded-full" style={`background:${item.color}`} />{item.label}</span><span class="shrink-0 text-right"><span class="tabular-nums">{formatValue(chart.rows[hoveredIndex].values[index])}</span>{#if showPercentages}<span class="ml-1 text-[10px] text-slate-400 dark:text-slate-500">{hoveredTotal ? `${((chart.rows[hoveredIndex].values[index] / hoveredTotal) * 100).toFixed(0)}%` : '0%'}</span>{/if}</span></div>
             {/each}
           </div>
         </div>
