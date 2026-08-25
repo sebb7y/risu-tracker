@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { deriveHelloTalk, resolveHelloTalkConfig, type HelloTalkConfig, type HelloTalkImportInput, type HelloTalkImportPreview } from './hello-talk';
 
 export type ImmersionKind = 'reading' | 'listening' | 'anime' | 'manga' | 'other';
 
@@ -23,6 +24,12 @@ export interface CsvImportResult {
   duplicates: number;
   invalid: number;
   fileName: string;
+}
+
+export interface HelloTalkImportResult extends HelloTalkImportPreview {
+  batchId: number;
+  imported: number;
+  duplicates: number;
 }
 
 export interface AnkiReviewInput {
@@ -55,7 +62,9 @@ db.exec(`
     imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     imported_count INTEGER NOT NULL DEFAULT 0,
     duplicate_count INTEGER NOT NULL DEFAULT 0,
-    invalid_count INTEGER NOT NULL DEFAULT 0
+    invalid_count INTEGER NOT NULL DEFAULT 0,
+    config_json TEXT,
+    raw_data TEXT
   );
 
   CREATE TABLE IF NOT EXISTS activity_events (
@@ -78,9 +87,26 @@ db.exec(`
     UNIQUE (user_id, fingerprint)
   );
 
+  CREATE TABLE IF NOT EXISTS service_configs (
+    user_id TEXT NOT NULL REFERENCES users(id),
+    service_key TEXT NOT NULL,
+    config_json TEXT NOT NULL,
+    use_shared INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, service_key)
+  );
+
   CREATE INDEX IF NOT EXISTS activity_events_user_date
     ON activity_events (user_id, occurred_at);
 `);
+
+// Lightweight migrations for databases created before service imports existed.
+for (const statement of [
+  "ALTER TABLE import_batches ADD COLUMN config_json TEXT",
+  "ALTER TABLE import_batches ADD COLUMN raw_data TEXT",
+]) {
+  try { db.exec(statement); } catch { /* Column already exists. */ }
+}
 
 const DEFAULT_USER_ID = process.env.RISU_USER_ID ?? 'local-user';
 const defaultUser = db.prepare('SELECT id FROM users WHERE id = ?').get(DEFAULT_USER_ID);
@@ -114,6 +140,34 @@ db.prepare(`
                  json_extract(raw_data, '$.timeMs')
      )
 `).run();
+
+// Early HelloTalk imports treated H:MM:SS durations as seconds while storing
+// them as minutes. Correct those already-imported call events once.
+const helloTalkDurationFixVersion = Number(db.pragma('user_version', { simple: true }));
+if (helloTalkDurationFixVersion < 1) {
+  db.pragma('user_version = 1');
+}
+if (helloTalkDurationFixVersion < 2) {
+  const callEvents = db.prepare("SELECT id, raw_data AS rawData FROM activity_events WHERE activity_type = 'hellotalk' AND metric = 'output_calls' AND source = 'hellotalk-csv'").all() as Array<{ id: number; rawData: string }>;
+  const updateCall = db.prepare('UPDATE activity_events SET value = ? WHERE id = ?');
+  const parseCallMinutes = (value: string): number => {
+    const parts = value.trim().split(':').map(Number);
+    if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] + parts[1] / 60;
+    if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1] + parts[2] / 60;
+    return 0;
+  };
+  const repairCalls = db.transaction(() => {
+    for (const event of callEvents) {
+      try {
+        const raw = JSON.parse(event.rawData) as { duration?: string };
+        const durationMinutes = parseCallMinutes(raw.duration ?? '');
+        if (durationMinutes > 0) updateCall.run(durationMinutes * 0.6, event.id);
+      } catch { /* Leave malformed legacy rows untouched. */ }
+    }
+  });
+  repairCalls();
+  db.pragma('user_version = 2');
+}
 
 function splitCsvLine(line: string): string[] {
   const cells: string[] = [];
@@ -233,6 +287,62 @@ const insertAnkiEvent = db.prepare(`
     (user_id, import_batch_id, activity_type, metric, value, unit, occurred_at, title, notes, points, source, source_record_id, fingerprint, raw_data)
   VALUES (@userId, @batchId, 'anki', @metric, @value, @unit, @occurredAt, @title, @notes, @points, @source, @sourceRecordId, @fingerprint, @rawData)
 `);
+
+const insertHelloTalkEvent = db.prepare(`
+  INSERT OR IGNORE INTO activity_events
+    (user_id, import_batch_id, activity_type, metric, value, unit, occurred_at, title, notes, points, source, source_record_id, fingerprint, raw_data)
+  VALUES (@userId, @batchId, @activityType, @metric, @value, @unit, @occurredAt, @title, @notes, 0, 'hellotalk-csv', @sourceRecordId, @fingerprint, @rawData)
+`);
+
+export function importHelloTalkCsv(input: HelloTalkImportInput, userId = DEFAULT_USER_ID): HelloTalkImportResult {
+  // `input.userId` is the user's HelloTalk sender ID. The function's
+  // `userId` is the local tracker account and must not replace it.
+  const derivation = deriveHelloTalk(input);
+  const fileName = [input.messagesFileName, input.callsFileName].filter(Boolean).join(' + ') || 'HelloTalk CSV export';
+  const createBatch = db.prepare(`
+    INSERT INTO import_batches (user_id, source, file_name, imported_count, config_json, raw_data)
+    VALUES (?, 'hellotalk-csv', ?, 0, ?, ?)
+  `);
+  const updateBatch = db.prepare('UPDATE import_batches SET imported_count = ?, duplicate_count = ? WHERE id = ?');
+  const run = db.transaction(() => {
+    // Re-importing the same HelloTalk export should re-derive its events with
+    // the current user ID and settings instead of being treated as duplicates.
+    const previousBatches = db.prepare("SELECT id FROM import_batches WHERE user_id = ? AND source = 'hellotalk-csv' AND file_name = ?").all(userId, fileName) as Array<{ id: number }>;
+    for (const previousBatch of previousBatches) {
+      db.prepare('DELETE FROM activity_events WHERE import_batch_id = ?').run(previousBatch.id);
+      db.prepare('DELETE FROM import_batches WHERE id = ?').run(previousBatch.id);
+    }
+    db.prepare(`
+      INSERT INTO service_configs (user_id, service_key, config_json, use_shared)
+      VALUES (?, 'hellotalk', ?, 1)
+      ON CONFLICT(user_id, service_key) DO UPDATE SET config_json = excluded.config_json, updated_at = CURRENT_TIMESTAMP
+    `).run(userId, JSON.stringify(derivation.config));
+    const batch = createBatch.run(userId, fileName, JSON.stringify(derivation.config), JSON.stringify(derivation.rawRows));
+    let imported = 0;
+    let duplicates = 0;
+    for (const event of derivation.events) {
+      const result = insertHelloTalkEvent.run({
+        userId, batchId: batch.lastInsertRowid, ...event,
+        fingerprint: fingerprint(['hellotalk', event.metric, event.sourceRecordId]),
+        rawData: JSON.stringify(event.rawData),
+      });
+      if (result.changes === 1) imported += 1;
+      else duplicates += 1;
+    }
+    updateBatch.run(imported, duplicates, batch.lastInsertRowid);
+    return { batchId: Number(batch.lastInsertRowid), imported, duplicates, ...derivation.preview };
+  });
+  return run();
+}
+
+export function getServiceConfig(serviceKey: string, userId = DEFAULT_USER_ID): unknown | null {
+  const row = db.prepare('SELECT config_json AS config FROM service_configs WHERE user_id = ? AND service_key = ?').get(userId, serviceKey) as { config?: string } | undefined;
+  if (!row?.config) return null;
+  try {
+    const config = JSON.parse(row.config);
+    return serviceKey === 'hellotalk' ? resolveHelloTalkConfig(config) : config;
+  } catch { return null; }
+}
 
 export function importImmersionCsv(rawCsv: string, fileName: string, userId = DEFAULT_USER_ID, source = 'csv-import'): CsvImportResult {
   const parsed = parseCsv(rawCsv);

@@ -6,6 +6,7 @@ import MonthlyBreakdown from '../../components/svelte/MonthlyBreakdown.svelte';
 import CsvImportDialog from '../../components/svelte/CsvImportDialog.svelte';
 import ImmersionTimelineChart from '../../components/svelte/ImmersionTimelineChart.svelte';
 import AnkiSyncButton from '../../components/svelte/AnkiSyncButton.svelte';
+import HelloTalkImportDialog from '../../components/svelte/HelloTalkImportDialog.svelte';
 import { getDailyActivityMetrics, getImmersionLogs } from '../../lib/db';
 
 import fs from 'node:fs/promises';
@@ -478,6 +479,7 @@ const recentLogEntries: RecentLogExportEntry[] = [];
 const csvSnapshots: CsvSnapshotEntry[] = [];
 
 const ankiMetrics = getDailyActivityMetrics().filter((metric) => metric.activityType === 'anki');
+const helloTalkMetrics = getDailyActivityMetrics().filter((metric) => metric.activityType === 'hellotalk');
 const ankiDecks = [...new Set(ankiMetrics.map((metric) => metric.title).filter(Boolean))].sort();
 const ankiDeckKeys = new Map(ankiDecks.map((deck, index) => [deck, `anki_deck_${index}`]));
 
@@ -488,6 +490,9 @@ const chartTypes = [
   { key: 'manga', label: 'Manga', color: '#10b981' },
   { key: 'other', label: 'Other', color: '#64748b' },
   { key: 'anki', label: 'Anki', color: '#f59e0b', group: 'anki' },
+  { key: 'hellotalk_output_text', label: 'HelloTalk · output text', color: '#ec4899', group: 'hellotalk' },
+  { key: 'hellotalk_output_calls', label: 'HelloTalk · output calls', color: '#8b5cf6', group: 'hellotalk' },
+  { key: 'hellotalk_reading_text', label: 'HelloTalk · reading text', color: '#14b8a6', group: 'hellotalk' },
   ...ankiDecks.map((deck, index) => ({ key: ankiDeckKeys.get(deck)!, label: `Anki · ${deck}`, color: `hsl(${28 + (index * 37) % 45} 88% ${55 + (index % 3) * 6}%)`, group: 'anki', deck })),
 ];
 
@@ -511,6 +516,15 @@ for (const metric of ankiMetrics) {
     value.points += metric.points;
     value.hours += metric.metric === 'time' ? metric.value / 60 : 0;
   }
+}
+
+for (const metric of helloTalkMetrics) {
+  if (!chartByDay.has(metric.day)) {
+    chartByDay.set(metric.day, Object.fromEntries(chartTypes.map((type) => [type.key, { points: 0, hours: 0 }])));
+  }
+  const key = `hellotalk_${metric.metric}`;
+  const value = chartByDay.get(metric.day)![key];
+  if (value) value.hours += metric.value / 60;
 }
 
 const chartDays: { date: string; values: Record<string, { points: number; hours: number }> }[] = [];
@@ -775,6 +789,7 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
         csvSnapshots={csvSnapshots}
       />
       <CsvImportDialog client:load />
+      <HelloTalkImportDialog client:load />
       <AnkiSyncButton client:load />
     </div>
 
