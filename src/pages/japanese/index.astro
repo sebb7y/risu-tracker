@@ -4,6 +4,7 @@ import ImmersionHeatmaps from '../../components/svelte/ImmersionHeatmaps.svelte'
 import ImmersionLogDialog from '../../components/svelte/ImmersionLogDialog.svelte';
 import MonthlyBreakdown from '../../components/svelte/MonthlyBreakdown.svelte';
 import CsvImportDialog from '../../components/svelte/CsvImportDialog.svelte';
+import ImmersionTimelineChart from '../../components/svelte/ImmersionTimelineChart.svelte';
 import { getImmersionLogs } from '../../lib/db';
 
 import fs from 'node:fs/promises';
@@ -475,6 +476,35 @@ const logs = getImmersionLogs();
 const recentLogEntries: RecentLogExportEntry[] = [];
 const csvSnapshots: CsvSnapshotEntry[] = [];
 
+const chartTypes = [
+  { key: 'reading', label: 'Reading time', color: '#6366f1' },
+  { key: 'listening', label: 'Listening time', color: '#06b6d4' },
+  { key: 'anime', label: 'Anime', color: '#f43f5e' },
+  { key: 'manga', label: 'Manga', color: '#10b981' },
+  { key: 'other', label: 'Other', color: '#64748b' },
+];
+
+const chartByDay = new Map<string, Record<string, { points: number; hours: number }>>();
+for (const log of logs) {
+  if (!chartByDay.has(log.logDayKey)) {
+    chartByDay.set(log.logDayKey, Object.fromEntries(chartTypes.map((type) => [type.key, { points: 0, hours: 0 }])));
+  }
+  const value = chartByDay.get(log.logDayKey)![log.canonicalType];
+  value.points += log.points;
+  value.hours += log.points / 40.2;
+}
+
+const chartDays: { date: string; values: Record<string, { points: number; hours: number }> }[] = [];
+if (logs.length) {
+  for (let cursor = new Date(`${logs[0].logDayKey}T12:00:00Z`); cursor <= new Date(`${logs.at(-1)!.logDayKey}T12:00:00Z`); cursor = addDaysUTC(cursor, 1)) {
+    const date = dateKey(cursor);
+    chartDays.push({
+      date,
+      values: chartByDay.get(date) ?? Object.fromEntries(chartTypes.map((type) => [type.key, { points: 0, hours: 0 }])),
+    });
+  }
+}
+
 const totalPoints = logs.reduce((sum, log) => sum + log.points, 0);
 const firstDate = logs.length ? logs[0].date : null;
 const lastDate = logs.length ? logs[logs.length - 1].date : null;
@@ -726,6 +756,10 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
       />
       <CsvImportDialog client:load />
     </div>
+
+    <section class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <ImmersionTimelineChart client:load days={chartDays} series={chartTypes} />
+    </section>
 
     <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
       <article class="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
