@@ -28,3 +28,14 @@ Before adding integrations, replace the CSV snapshot flow with a small
 versioned data store and importers for manually exported data. Astro + Svelte
 remains a reasonable fit for the dashboard and interactive charts; the
 storage/import layer should stay separate from the UI.
+
+## Anki
+
+The dashboard can optionally sync review history from a locally running Anki
+through [AnkiConnect](https://ankiweb.net/shared/info/2055492159). Install the
+plugin, keep Anki open, and use **Sync Anki** on the dashboard. The gear beside
+the button configures the AnkiConnect URL and remembers it in the browser. The
+self-hosted server proxies the request, so CORS is not needed when Risu Tracker
+and Anki run on the same machine. Syncs are repeatable:
+previously seen
+reviews are skipped, and new events retain their deck and review timing.

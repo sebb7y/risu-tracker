@@ -25,6 +25,15 @@ export interface CsvImportResult {
   fileName: string;
 }
 
+export interface AnkiReviewInput {
+  reviewId: string;
+  deck: string;
+  reviewedAt: string;
+  timeMs: number;
+  rating?: number;
+  cardId?: string;
+}
+
 const dataDir = path.resolve(process.env.RISU_DATA_DIR ?? 'data');
 fs.mkdirSync(dataDir, { recursive: true });
 
@@ -202,6 +211,12 @@ const insertEvent = db.prepare(`
   VALUES (@userId, @batchId, 'immersion', @metric, @value, @unit, @occurredAt, @title, @notes, @points, @source, @sourceRecordId, @fingerprint, @rawData)
 `);
 
+const insertAnkiEvent = db.prepare(`
+  INSERT OR IGNORE INTO activity_events
+    (user_id, import_batch_id, activity_type, metric, value, unit, occurred_at, title, notes, points, source, source_record_id, fingerprint, raw_data)
+  VALUES (@userId, @batchId, 'anki', @metric, @value, @unit, @occurredAt, @title, @notes, @points, @source, @sourceRecordId, @fingerprint, @rawData)
+`);
+
 export function importImmersionCsv(rawCsv: string, fileName: string, userId = DEFAULT_USER_ID, source = 'csv-import'): CsvImportResult {
   const parsed = parseCsv(rawCsv);
   const createBatch = db.prepare('INSERT INTO import_batches (user_id, source, file_name, invalid_count) VALUES (?, ?, ?, ?)');
@@ -314,7 +329,72 @@ export function addImmersionLog(input: {
   });
 }
 
+export function importAnkiReviews(reviews: AnkiReviewInput[], userId = DEFAULT_USER_ID): { imported: number; duplicates: number; batchId: number } {
+  const createBatch = db.prepare("INSERT INTO import_batches (user_id, source, file_name) VALUES (?, 'anki-connect', 'AnkiConnect sync')");
+  const updateBatch = db.prepare('UPDATE import_batches SET imported_count = ?, duplicate_count = ? WHERE id = ?');
+  const run = db.transaction(() => {
+    const batch = createBatch.run(userId);
+    let imported = 0;
+    let duplicates = 0;
+
+    for (const review of reviews) {
+      const date = new Date(review.reviewedAt);
+      if (!review.reviewId || !review.deck || Number.isNaN(date.getTime())) continue;
+      const base = {
+        userId,
+        batchId: batch.lastInsertRowid,
+        occurredAt: date.toISOString(),
+        title: review.deck,
+        notes: review.rating ? `Rating ${review.rating}` : null,
+        source: 'anki-connect',
+        rawData: JSON.stringify(review),
+      };
+
+      const reviewResult = insertAnkiEvent.run({
+        ...base,
+        metric: 'reviews',
+        value: 1,
+        unit: 'reviews',
+        points: 1,
+        sourceRecordId: `${review.reviewId}:reviews`,
+        fingerprint: fingerprint(['anki', review.reviewId, 'reviews']),
+      });
+      if (reviewResult.changes === 1) imported += 1;
+      else duplicates += 1;
+
+      if (Number.isFinite(review.timeMs) && review.timeMs > 0) {
+        const timeResult = insertAnkiEvent.run({
+          ...base,
+          metric: 'time',
+          value: review.timeMs / 60000,
+          unit: 'minutes',
+          points: review.timeMs / 60000,
+          sourceRecordId: `${review.reviewId}:time`,
+          fingerprint: fingerprint(['anki', review.reviewId, 'time']),
+        });
+        if (timeResult.changes === 1) imported += 1;
+        else duplicates += 1;
+      }
+    }
+
+    updateBatch.run(imported, duplicates, batch.lastInsertRowid);
+    return { imported, duplicates, batchId: Number(batch.lastInsertRowid) };
+  });
+  return run();
+}
+
 export function getNextLogId(userId = DEFAULT_USER_ID): number {
   const row = db.prepare("SELECT MAX(CAST(source_record_id AS INTEGER)) AS maxId FROM activity_events WHERE user_id = ? AND activity_type = 'immersion'").get(userId) as { maxId: number | null };
   return (row.maxId ?? 0) + 1;
+}
+
+export function getDailyActivityMetrics(userId = DEFAULT_USER_ID): Array<{ day: string; activityType: string; metric: string; title: string; value: number; points: number }> {
+  return db.prepare(`
+    SELECT substr(occurred_at, 1, 10) AS day, activity_type AS activityType, metric, COALESCE(title, '') AS title,
+           SUM(value) AS value, SUM(points) AS points
+      FROM activity_events
+     WHERE user_id = ?
+     GROUP BY day, activity_type, metric
+     ORDER BY day ASC
+  `).all(userId) as Array<{ day: string; activityType: string; metric: string; title: string; value: number; points: number }>;
 }

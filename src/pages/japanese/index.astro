@@ -5,7 +5,8 @@ import ImmersionLogDialog from '../../components/svelte/ImmersionLogDialog.svelt
 import MonthlyBreakdown from '../../components/svelte/MonthlyBreakdown.svelte';
 import CsvImportDialog from '../../components/svelte/CsvImportDialog.svelte';
 import ImmersionTimelineChart from '../../components/svelte/ImmersionTimelineChart.svelte';
-import { getImmersionLogs } from '../../lib/db';
+import AnkiSyncButton from '../../components/svelte/AnkiSyncButton.svelte';
+import { getDailyActivityMetrics, getImmersionLogs } from '../../lib/db';
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -476,12 +477,18 @@ const logs = getImmersionLogs();
 const recentLogEntries: RecentLogExportEntry[] = [];
 const csvSnapshots: CsvSnapshotEntry[] = [];
 
+const ankiMetrics = getDailyActivityMetrics().filter((metric) => metric.activityType === 'anki');
+const ankiDecks = [...new Set(ankiMetrics.map((metric) => metric.title).filter(Boolean))].sort();
+const ankiDeckKeys = new Map(ankiDecks.map((deck, index) => [deck, `anki_deck_${index}`]));
+
 const chartTypes = [
   { key: 'reading', label: 'Reading time', color: '#6366f1' },
   { key: 'listening', label: 'Listening time', color: '#06b6d4' },
   { key: 'anime', label: 'Anime', color: '#f43f5e' },
   { key: 'manga', label: 'Manga', color: '#10b981' },
   { key: 'other', label: 'Other', color: '#64748b' },
+  { key: 'anki', label: 'Anki', color: '#f59e0b', group: 'anki' },
+  ...ankiDecks.map((deck, index) => ({ key: ankiDeckKeys.get(deck)!, label: `Anki · ${deck}`, color: `hsl(${28 + (index * 37) % 45} 88% ${55 + (index % 3) * 6}%)`, group: 'anki', deck })),
 ];
 
 const chartByDay = new Map<string, Record<string, { points: number; hours: number }>>();
@@ -494,9 +501,22 @@ for (const log of logs) {
   value.hours += log.points / 40.2;
 }
 
+for (const metric of ankiMetrics) {
+  const keys = ['anki', ...(ankiDeckKeys.has(metric.title) ? [ankiDeckKeys.get(metric.title)!] : [])];
+  if (!chartByDay.has(metric.day)) {
+    chartByDay.set(metric.day, Object.fromEntries(chartTypes.map((type) => [type.key, { points: 0, hours: 0 }])));
+  }
+  for (const key of keys) {
+    const value = chartByDay.get(metric.day)![key];
+    value.points += metric.points;
+    value.hours += metric.metric === 'time' ? metric.value / 60 : 0;
+  }
+}
+
 const chartDays: { date: string; values: Record<string, { points: number; hours: number }> }[] = [];
-if (logs.length) {
-  for (let cursor = new Date(`${logs[0].logDayKey}T12:00:00Z`); cursor <= new Date(`${logs.at(-1)!.logDayKey}T12:00:00Z`); cursor = addDaysUTC(cursor, 1)) {
+const chartDateKeys = [...chartByDay.keys()].sort();
+if (chartDateKeys.length) {
+  for (let cursor = new Date(`${chartDateKeys[0]}T12:00:00Z`); cursor <= new Date(`${chartDateKeys.at(-1)!}T12:00:00Z`); cursor = addDaysUTC(cursor, 1)) {
     const date = dateKey(cursor);
     chartDays.push({
       date,
@@ -755,6 +775,7 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
         csvSnapshots={csvSnapshots}
       />
       <CsvImportDialog client:load />
+      <AnkiSyncButton client:load />
     </div>
 
     <section class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
