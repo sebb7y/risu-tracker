@@ -98,6 +98,23 @@ db.prepare(`
      AND json_extract(raw_data, '$."Log Date"') IS NOT NULL
 `).run(DEFAULT_USER_ID);
 
+// AnkiConnect returns subdeck cards when querying a parent deck. Older syncs
+// queried both, so remove duplicate review/time events using the stable card
+// and review timestamp retained in raw_data.
+db.prepare(`
+  DELETE FROM activity_events
+   WHERE activity_type = 'anki'
+     AND id NOT IN (
+       SELECT MIN(id)
+         FROM activity_events
+        WHERE activity_type = 'anki'
+        GROUP BY metric,
+                 json_extract(raw_data, '$.cardId'),
+                 json_extract(raw_data, '$.reviewedAt'),
+                 json_extract(raw_data, '$.timeMs')
+     )
+`).run();
+
 function splitCsvLine(line: string): string[] {
   const cells: string[] = [];
   let current = '';

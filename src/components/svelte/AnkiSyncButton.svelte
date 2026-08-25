@@ -43,8 +43,9 @@
     error = '';
     try {
       window.localStorage.setItem('anki-connect-endpoint', endpoint.replace(/\/$/, ''));
-      const decks = await anki<string[]>('deckNames');
+      const decks = (await anki<string[]>('deckNames')).sort((a, b) => b.split('::').length - a.split('::').length);
       const reviews: Array<{ reviewId: string; deck: string; reviewedAt: string; timeMs: number; rating?: number; cardId: string }> = [];
+      const seenReviews = new Set<string>();
 
       for (const deck of decks) {
         status = `Reading ${deck}…`;
@@ -54,8 +55,11 @@
           for (const [cardId, cardReviews] of Object.entries(result)) {
             for (const [index, review] of cardReviews.entries()) {
               const timestamp = review.id < 1_000_000_000_000 ? review.id * 1000 : review.id;
+              const reviewKey = `${cardId}:${timestamp}:${review.usn ?? index}:${review.type ?? 0}:${review.time ?? 0}`;
+              if (seenReviews.has(reviewKey)) continue;
+              seenReviews.add(reviewKey);
               reviews.push({
-                reviewId: `${deck}:${cardId}:${timestamp}:${review.usn ?? index}:${review.type ?? 0}`,
+                reviewId: reviewKey,
                 deck,
                 reviewedAt: new Date(timestamp).toISOString(),
                 timeMs: Number(review.time) || 0,
