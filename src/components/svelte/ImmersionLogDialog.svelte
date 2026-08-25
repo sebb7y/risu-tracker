@@ -246,7 +246,7 @@
   $: computedPoints = pointsFor(currentKind, Number(amount) || 0);
 </script>
 
-<div class="mb-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+<div class="contents">
   <div class="flex flex-wrap items-center gap-2">
     <button
       type="button"
@@ -488,4 +488,3 @@
     </div>
   </div>
 </dialog>
-
