@@ -23,8 +23,8 @@
   type ComponentAction = 'show' | 'hide' | 'merge';
 
   const chartWidth = 960;
-  const chartHeight = 390;
-  const padding = { top: 20, right: 20, bottom: 48, left: 58 };
+  const chartHeight = 460;
+  const padding = { top: 24, right: 24, bottom: 62, left: 72 };
   const plotWidth = chartWidth - padding.left - padding.right;
   const plotHeight = chartHeight - padding.top - padding.bottom;
 
@@ -40,9 +40,7 @@
   let compoundName = '';
   let hydrated = false;
   let enabled: Record<string, boolean> = {};
-  let container: HTMLDivElement;
   let hoveredIndex: number | null = null;
-  let containerWidth = 0;
 
   $: if (series.length && Object.keys(enabled).length === 0) {
     enabled = Object.fromEntries(series.map((item) => [item.key, true]));
@@ -52,21 +50,17 @@
   }
 
   $: visibleDays = getVisibleDays(days, range);
-  $: displaySeries = series.filter((item) => item.group !== 'anki' || (splitAnkiByDeck ? item.key !== 'anki' : item.key === 'anki'));
+  $: displaySeries = [...series.filter((item) => item.group !== 'anki' || (splitAnkiByDeck ? item.key !== 'anki' : item.key === 'anki'))]
+    .sort((left, right) => left.key === 'other' ? 1 : right.key === 'other' ? -1 : 0);
   $: configured = configureSeries(visibleDays, displaySeries, componentActions, mergeTargets, compounds);
   $: prepared = collapseSmallSeries(configured.days, configured.series, Number(minimumHours) || 0);
   $: chartSeries = prepared.series;
   $: chart = buildChart(prepared.days, chartSeries, scale, mode);
+  $: pieSlices = buildPieSlices(prepared.days, chartSeries);
   $: hoveredDay = hoveredIndex === null ? null : prepared.days[hoveredIndex] ?? null;
   $: hoveredTotal = hoveredIndex === null || !chart.rows[hoveredIndex] ? 0 : chart.rows[hoveredIndex].values.reduce((total, value) => total + value, 0);
 
   onMount(() => {
-    const resize = () => {
-      containerWidth = container?.clientWidth ?? 0;
-    };
-    resize();
-    const observer = new ResizeObserver(resize);
-    if (container) observer.observe(container);
     try {
       const saved = JSON.parse(window.localStorage.getItem('risu-timeline-config') ?? '{}') as {
         range?: Range; mode?: Mode; splitAnkiByDeck?: boolean; minimumHours?: number; showPercentages?: boolean;
@@ -84,7 +78,6 @@
       // Ignore malformed local configuration.
     }
     hydrated = true;
-    return () => observer.disconnect();
   });
 
   $: if (hydrated) {
@@ -125,7 +118,9 @@
       });
     });
     const max = Math.max(1, ...stacks.map((row) => row.at(-1)?.top ?? 0));
-    const tickStep = niceStep(max / 4);
+    // Keep the data scale stable while resizing; only the plot's vertical
+    // spacing should change when the container height changes.
+    const tickStep = niceStep(max / 6);
     const yMax = Math.max(tickStep, Math.ceil(max / tickStep) * tickStep);
 
     const areas = active.map((item, seriesIndex) => {
@@ -141,6 +136,13 @@
       areas,
       yMax,
       ticks: Array.from({ length: Math.floor(yMax / tickStep) + 1 }, (_, index) => index * tickStep),
+      xTicks: input.length <= 1
+        ? [{ index: 0, label: input[0]?.date ?? '' }]
+        : Array.from({ length: Math.min(4, input.length) }, (_, index) => {
+          const tickCount = Math.min(4, input.length);
+          const tickIndex = Math.round((index / (tickCount - 1)) * (input.length - 1));
+          return { index: tickIndex, label: input[tickIndex].date };
+        }).filter((tick, index, ticks) => index === ticks.findIndex((candidate) => candidate.index === tick.index)),
       rows,
     };
   }
@@ -197,7 +199,8 @@
 
     const outputSeries = [...outputKeys]
       .map((key) => targetSeries.get(key))
-      .filter((item): item is ChartSeries => Boolean(item));
+      .filter((item): item is ChartSeries => Boolean(item))
+      .sort((left, right) => left.key === 'other' ? 1 : right.key === 'other' ? -1 : 0);
     const outputDays = input.map((day) => ({
       ...day,
       values: Object.fromEntries(outputSeries.map((item) => [item.key, mergedValues.get(item.key)?.[day.date] ?? { points: 0, hours: 0 }])),
@@ -234,6 +237,30 @@
     return new Date(`${value}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   }
 
+  function formatAxisDate(value: string): string {
+    return new Date(`${value}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+  }
+
+  function buildPieSlices(input: ChartDay[], active: ChartSeries[]) {
+    const totals = active.map((item) => ({ item, hours: input.reduce((total, day) => total + (day.values[item.key]?.hours ?? 0), 0) }));
+    const totalHours = totals.reduce((total, slice) => total + slice.hours, 0);
+    if (totalHours <= 0) return [];
+    const circumference = 2 * Math.PI * 70;
+    let consumed = 0;
+    return totals.filter((slice) => slice.hours > 0).map((slice) => {
+      const percentage = slice.hours / totalHours;
+      const result = {
+        ...slice,
+        percentage,
+        totalHours,
+        dash: `${percentage * circumference} ${circumference}`,
+        offset: -consumed * circumference,
+      };
+      consumed += percentage;
+      return result;
+    });
+  }
+
   function toggle(key: string) {
     enabled = { ...enabled, [key]: !enabled[key] };
   }
@@ -258,9 +285,10 @@
     const relative = (event.clientX - bounds.left) / bounds.width;
     hoveredIndex = Math.max(0, Math.min(visibleDays.length - 1, Math.round(relative * (visibleDays.length - 1))));
   }
+
 </script>
 
-<div bind:this={container} class="space-y-4">
+<div class="space-y-4">
   <div class="flex flex-wrap items-center justify-between gap-3">
     <div>
       <h2 class="text-xl font-semibold">Immersion timeline</h2>
@@ -329,20 +357,23 @@
   </div>
 
   {#if visibleDays.length && chartSeries.length}
-    <div class="relative overflow-hidden rounded-xl border border-slate-200 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-950/30" style={`min-height:${containerWidth < 640 ? 280 : 390}px`}>
-      <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} class="block h-auto min-h-[280px] w-full" role="img" aria-label="Interactive immersion timeline chart">
+    <div class="relative overflow-hidden rounded-xl border border-slate-200 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-950/30">
+      <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} class="block h-auto w-full" role="img" aria-label="Interactive immersion timeline chart">
         {#each chart.ticks as tick}
-          <line x1={padding.left} x2={chartWidth - padding.right} y1={y(tick)} y2={y(tick)} stroke="currentColor" stroke-opacity="0.1" />
-          <text x={padding.left - 10} y={y(tick) + 4} text-anchor="end" class="fill-slate-400 text-[11px] dark:fill-slate-500">{tick.toLocaleString('en-US', { maximumFractionDigits: 1 })}</text>
+          <line x1={padding.left} x2={chartWidth - padding.right} y1={y(tick)} y2={y(tick)} stroke="currentColor" stroke-opacity={tick === 0 ? '0.2' : '0.1'} stroke-dasharray={tick === 0 ? undefined : '2 6'} />
+          <line x1={padding.left - 6} x2={padding.left} y1={y(tick)} y2={y(tick)} stroke="currentColor" stroke-opacity="0.25" />
+          <text x={padding.left - 12} y={y(tick) + 4} text-anchor="end" class="fill-slate-500 text-[11px] font-medium dark:fill-slate-400">{tick.toLocaleString('en-US', { maximumFractionDigits: 1 })}h</text>
+        {/each}
+        <text x={padding.left} y={padding.top - 9} class="fill-slate-400 text-[10px] font-semibold uppercase tracking-[0.16em] dark:fill-slate-500">Hours</text>
+        {#each chart.xTicks as tick}
+          <line x1={x(tick.index)} x2={x(tick.index)} y1={padding.top} y2={chartHeight - padding.bottom} stroke="currentColor" stroke-opacity="0.055" />
+          <line x1={x(tick.index)} x2={x(tick.index)} y1={chartHeight - padding.bottom} y2={chartHeight - padding.bottom + 6} stroke="currentColor" stroke-opacity="0.25" />
+          <text x={x(tick.index)} y={chartHeight - 26} text-anchor={tick.index === 0 ? 'start' : tick.index === visibleDays.length - 1 ? 'end' : 'middle'} class="fill-slate-500 text-[11px] font-medium dark:fill-slate-400">{formatAxisDate(tick.label)}</text>
         {/each}
         {#each chart.areas as area}
           <path d={area.path} fill={area.color} fill-opacity="0.72" stroke={area.color} stroke-width="1.2" stroke-opacity="0.9" />
         {/each}
-        <line x1={padding.left} x2={chartWidth - padding.right} y1={chartHeight - padding.bottom} y2={chartHeight - padding.bottom} stroke="currentColor" stroke-opacity="0.2" />
-        {#if visibleDays.length}
-          <text x={padding.left} y={chartHeight - 17} class="fill-slate-400 text-[11px] dark:fill-slate-500">{formatDate(visibleDays[0].date)}</text>
-          <text x={chartWidth - padding.right} y={chartHeight - 17} text-anchor="end" class="fill-slate-400 text-[11px] dark:fill-slate-500">{formatDate(visibleDays.at(-1)!.date)}</text>
-        {/if}
+        <line x1={padding.left} x2={chartWidth - padding.right} y1={chartHeight - padding.bottom} y2={chartHeight - padding.bottom} stroke="currentColor" stroke-opacity="0.25" />
         {#if hoveredIndex !== null}
           <line x1={x(hoveredIndex)} x2={x(hoveredIndex)} y1={padding.top} y2={chartHeight - padding.bottom} stroke="currentColor" stroke-opacity="0.45" stroke-dasharray="4 4" />
         {/if}
@@ -361,6 +392,30 @@
         </div>
       {/if}
     </div>
+    {#if pieSlices.length}
+      <details class="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <summary class="cursor-pointer list-none px-4 py-3 text-sm font-semibold text-slate-700 dark:text-slate-200">Component breakdown</summary>
+        <div class="grid items-center gap-5 border-t border-slate-200 px-4 py-4 dark:border-slate-800 sm:grid-cols-[12rem_minmax(0,1fr)]">
+          <svg viewBox="0 0 220 220" class="mx-auto h-44 w-44" role="img" aria-label="Component breakdown donut chart">
+            <circle cx="110" cy="110" r="70" fill="none" stroke="currentColor" stroke-opacity="0.08" stroke-width="32" />
+            {#each pieSlices as slice}
+              <circle cx="110" cy="110" r="70" fill="none" stroke={slice.item.color} stroke-width="32" stroke-dasharray={slice.dash} stroke-dashoffset={slice.offset} stroke-linecap="butt" transform="rotate(-90 110 110)" />
+            {/each}
+            <circle cx="110" cy="110" r="51" class="fill-white dark:fill-slate-900" />
+            <text x="110" y="105" text-anchor="middle" class="fill-slate-900 text-[18px] font-semibold dark:fill-slate-100">{formatValue(pieSlices[0].totalHours)}</text>
+            <text x="110" y="124" text-anchor="middle" class="fill-slate-400 text-[9px] font-semibold uppercase tracking-[0.16em] dark:fill-slate-500">visible total</text>
+          </svg>
+          <div class="grid gap-x-6 gap-y-2 sm:grid-cols-2">
+            {#each pieSlices as slice}
+              <div class="flex min-w-0 items-center justify-between gap-3 text-sm">
+                <span class="flex min-w-0 items-center gap-2 truncate text-slate-600 dark:text-slate-300"><span class="h-2.5 w-2.5 shrink-0 rounded-full" style={`background:${slice.item.color}`} />{slice.item.label}</span>
+                <span class="shrink-0 tabular-nums text-slate-500 dark:text-slate-400">{formatValue(slice.hours)} · {(slice.percentage * 100).toFixed(0)}%</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+      </details>
+    {/if}
   {:else}
     <div class="rounded-xl border border-dashed border-slate-300 px-4 py-12 text-center text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">Enable at least one series to display the timeline.</div>
   {/if}
