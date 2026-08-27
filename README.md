@@ -1,7 +1,7 @@
 # Risu Tracker
 Yet another (agentically coded) language learning tracker
 
-<img src="public/risu.svg" alt="Risu squirrel" width="120">
+<img src="public/risu.svg" alt="Risu squirrel" width="200">
 
 ### Why this one?
 The primary goal is to support importing data from a ton of different sources (csv immersion logs, anki, hello talk, kakao, line, steam play time etc) to give a more well rounded view of your total time spent learning a language.
