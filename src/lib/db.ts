@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { deriveHelloTalk, resolveHelloTalkConfig, type HelloTalkConfig, type HelloTalkImportInput, type HelloTalkImportPreview } from './hello-talk';
+import { DEFAULT_DASHBOARD_COMPONENTS, resolveDashboardComponents, type DashboardComponentConfig } from './dashboard-config';
 
 export type ImmersionKind = 'reading' | 'listening' | 'anime' | 'manga' | 'other';
 
@@ -94,6 +95,12 @@ db.exec(`
     use_shared INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, service_key)
+  );
+
+  CREATE TABLE IF NOT EXISTS dashboard_configs (
+    user_id TEXT PRIMARY KEY REFERENCES users(id),
+    config_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
   CREATE INDEX IF NOT EXISTS activity_events_user_date
@@ -342,6 +349,21 @@ export function getServiceConfig(serviceKey: string, userId = DEFAULT_USER_ID): 
     const config = JSON.parse(row.config);
     return serviceKey === 'hellotalk' ? resolveHelloTalkConfig(config) : config;
   } catch { return null; }
+}
+
+export function getDashboardConfig(userId = DEFAULT_USER_ID): DashboardComponentConfig[] {
+  const row = db.prepare('SELECT config_json AS config FROM dashboard_configs WHERE user_id = ?').get(userId) as { config?: string } | undefined;
+  if (!row?.config) return DEFAULT_DASHBOARD_COMPONENTS;
+  try { return resolveDashboardComponents(JSON.parse(row.config) as DashboardComponentConfig[]); } catch { return DEFAULT_DASHBOARD_COMPONENTS; }
+}
+
+export function saveDashboardConfig(components: unknown[], userId = DEFAULT_USER_ID): void {
+  const config = resolveDashboardComponents(components as DashboardComponentConfig[]);
+  db.prepare(`
+    INSERT INTO dashboard_configs (user_id, config_json)
+    VALUES (?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET config_json = excluded.config_json, updated_at = CURRENT_TIMESTAMP
+  `).run(userId, JSON.stringify(config));
 }
 
 export function importImmersionCsv(rawCsv: string, fileName: string, userId = DEFAULT_USER_ID, source = 'csv-import'): CsvImportResult {

@@ -7,7 +7,9 @@ import CsvImportDialog from '../../components/svelte/CsvImportDialog.svelte';
 import ImmersionTimelineChart from '../../components/svelte/ImmersionTimelineChart.svelte';
 import AnkiSyncButton from '../../components/svelte/AnkiSyncButton.svelte';
 import HelloTalkImportDialog from '../../components/svelte/HelloTalkImportDialog.svelte';
-import { getDailyActivityMetrics, getImmersionLogs } from '../../lib/db';
+import DashboardSidebar from '../../components/svelte/DashboardSidebar.svelte';
+import { DASHBOARD_SOURCES } from '../../lib/dashboard-config';
+import { getDailyActivityMetrics, getDashboardConfig, getImmersionLogs } from '../../lib/db';
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -475,6 +477,8 @@ function formatCsvSnapshotLabel(mtimeMs: number): string {
 }
 
 const logs = getImmersionLogs();
+const dashboardComponents = getDashboardConfig();
+const timelineSources = new Set(dashboardComponents.find((component) => component.key === 'timeline')?.dataSources ?? ['immersion', 'anki', 'hellotalk']);
 const recentLogEntries: RecentLogExportEntry[] = [];
 const csvSnapshots: CsvSnapshotEntry[] = [];
 
@@ -484,20 +488,26 @@ const ankiDecks = [...new Set(ankiMetrics.map((metric) => metric.title).filter(B
 const ankiDeckKeys = new Map(ankiDecks.map((deck, index) => [deck, `anki_deck_${index}`]));
 
 const chartTypes = [
-  { key: 'reading', label: 'Reading time', color: '#6366f1' },
-  { key: 'listening', label: 'Listening time', color: '#06b6d4' },
-  { key: 'anime', label: 'Anime', color: '#f43f5e' },
-  { key: 'manga', label: 'Manga', color: '#10b981' },
-  { key: 'other', label: 'Other', color: '#64748b' },
-  { key: 'anki', label: 'Anki', color: '#f59e0b', group: 'anki' },
-  { key: 'hellotalk_output_text', label: 'HelloTalk · output text', color: '#ec4899', group: 'hellotalk' },
-  { key: 'hellotalk_output_calls', label: 'HelloTalk · output calls', color: '#8b5cf6', group: 'hellotalk' },
-  { key: 'hellotalk_reading_text', label: 'HelloTalk · reading text', color: '#14b8a6', group: 'hellotalk' },
-  ...ankiDecks.map((deck, index) => ({ key: ankiDeckKeys.get(deck)!, label: `Anki · ${deck}`, color: `hsl(${28 + (index * 37) % 45} 88% ${55 + (index % 3) * 6}%)`, group: 'anki', deck })),
+  ...(timelineSources.has('immersion') ? [
+    { key: 'reading', label: 'Reading time', color: '#6366f1' },
+    { key: 'listening', label: 'Listening time', color: '#06b6d4' },
+    { key: 'anime', label: 'Anime', color: '#f43f5e' },
+    { key: 'manga', label: 'Manga', color: '#10b981' },
+    { key: 'other', label: 'Other', color: '#64748b' },
+  ] : []),
+  ...(timelineSources.has('anki') ? [
+    { key: 'anki', label: 'Anki', color: '#f59e0b', group: 'anki' },
+    ...ankiDecks.map((deck, index) => ({ key: ankiDeckKeys.get(deck)!, label: `Anki · ${deck}`, color: `hsl(${28 + (index * 37) % 45} 88% ${55 + (index % 3) * 6}%)`, group: 'anki', deck })),
+  ] : []),
+  ...(timelineSources.has('hellotalk') ? [
+    { key: 'hellotalk_output_text', label: 'HelloTalk · output text', color: '#ec4899', group: 'hellotalk' },
+    { key: 'hellotalk_output_calls', label: 'HelloTalk · output calls', color: '#8b5cf6', group: 'hellotalk' },
+    { key: 'hellotalk_reading_text', label: 'HelloTalk · reading text', color: '#14b8a6', group: 'hellotalk' },
+  ] : []),
 ];
 
 const chartByDay = new Map<string, Record<string, { points: number; hours: number }>>();
-for (const log of logs) {
+for (const log of timelineSources.has('immersion') ? logs : []) {
   if (!chartByDay.has(log.logDayKey)) {
     chartByDay.set(log.logDayKey, Object.fromEntries(chartTypes.map((type) => [type.key, { points: 0, hours: 0 }])));
   }
@@ -506,7 +516,7 @@ for (const log of logs) {
   value.hours += log.points / 40.2;
 }
 
-for (const metric of ankiMetrics) {
+for (const metric of timelineSources.has('anki') ? ankiMetrics : []) {
   const keys = ['anki', ...(ankiDeckKeys.has(metric.title) ? [ankiDeckKeys.get(metric.title)!] : [])];
   if (!chartByDay.has(metric.day)) {
     chartByDay.set(metric.day, Object.fromEntries(chartTypes.map((type) => [type.key, { points: 0, hours: 0 }])));
@@ -518,7 +528,7 @@ for (const metric of ankiMetrics) {
   }
 }
 
-for (const metric of helloTalkMetrics) {
+for (const metric of timelineSources.has('hellotalk') ? helloTalkMetrics : []) {
   if (!chartByDay.has(metric.day)) {
     chartByDay.set(metric.day, Object.fromEntries(chartTypes.map((type) => [type.key, { points: 0, hours: 0 }])));
   }
@@ -768,17 +778,14 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
 
 <BaseLayout title="Risu Tracker">
   <section class="space-y-10">
-    <div class="space-y-3">
-      <h1>Immersion Dashboard</h1>
-      {
-        unknownTypes.size > 0 && (
-          <p class="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
-            Found unclassified media type(s): {[...unknownTypes].join(', ')}. Tell me if these should be mapped to
-            specific units.
-          </p>
-        )
-      }
-    </div>
+    {
+      unknownTypes.size > 0 && (
+        <p class="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+          Found unclassified media type(s): {[...unknownTypes].join(', ')}. Tell me if these should be mapped to
+          specific units.
+        </p>
+      )
+    }
 
     <div class="mb-6 flex w-full flex-wrap items-center justify-between gap-3">
       <ImmersionLogDialog
@@ -793,11 +800,13 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
       <AnkiSyncButton client:load />
     </div>
 
-    <section class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+    <DashboardSidebar client:load initialComponents={dashboardComponents} sources={DASHBOARD_SOURCES} />
+    <div data-dashboard-stack class="flex min-w-0 flex-col gap-10">
+    <section id="dashboard-timeline" data-dashboard-component="timeline" class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
       <ImmersionTimelineChart client:load days={chartDays} series={chartTypes} />
     </section>
 
-    <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <section id="dashboard-overview" data-dashboard-component="overview" class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
       <article class="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
         <p class="text-sm text-slate-500 dark:text-slate-400">Current streak</p>
         <div class="mt-1 flex items-center gap-2">
@@ -830,7 +839,7 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
       </article>
     </section>
 
-    <section class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+    <section id="dashboard-goals" data-dashboard-component="goals" class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
       <div class="flex items-end justify-between gap-3">
         <div>
           <h2 class="text-xl font-semibold">Reading Goals</h2>
@@ -919,7 +928,7 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
       </div>
     </section>
 
-    <section class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+    <section id="dashboard-heatmap" data-dashboard-component="heatmap" class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
       <div class="mb-4">
         <h2 class="text-xl font-semibold">Heatmap</h2>
       </div>
@@ -936,7 +945,7 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
       />
     </section>
 
-    <section class="space-y-4 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+    <section id="dashboard-monthly" data-dashboard-component="monthly" class="space-y-4 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <h2 class="text-xl font-semibold">Monthly Breakdown</h2>
         <div class="flex flex-wrap items-center gap-3 text-sm">
@@ -952,8 +961,7 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
       <MonthlyBreakdown client:load months={monthRows} visibleCount={6} />
     </section>
 
-    <section class="grid gap-6 lg:grid-cols-2">
-      <article class="space-y-3 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <article id="dashboard-raw-totals" data-dashboard-component="raw-totals" class="space-y-3 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
         <h2 class="text-xl font-semibold">Overall Raw Totals</h2>
         <ul class="space-y-2 text-slate-700 dark:text-slate-200">
           <li>Reading time: {number(readingMinutesTotal)} min ({formatHoursAndMinutes(readingMinutesTotal)})</li>
@@ -963,7 +971,7 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
         </ul>
       </article>
 
-      <article class="space-y-3 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <article id="dashboard-yearly" data-dashboard-component="yearly" class="space-y-3 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
         <h2 class="text-xl font-semibold">By Year</h2>
         <div class="space-y-3">
           {yearly.map(([year, values]) => {
@@ -989,9 +997,8 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
           })}
         </div>
       </article>
-    </section>
 
-    <section class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+    <section id="dashboard-extras" data-dashboard-component="extras" class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
       <h2 class="text-xl font-semibold">Interesting Extras</h2>
       <ul class="mt-3 space-y-2 text-slate-700 dark:text-slate-200">
         <li>Tracked period: {firstDate ? dateKey(firstDate) : 'N/A'} → {lastDate ? dateKey(lastDate) : 'N/A'}</li>
@@ -1002,5 +1009,6 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
         <li>Average points per month: {monthsTracked ? formatPoints(totalPoints / monthsTracked) : '0'}</li>
       </ul>
     </section>
+    </div>
   </section>
 </BaseLayout>
