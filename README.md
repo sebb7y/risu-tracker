@@ -1,10 +1,12 @@
 # Risu Tracker
 Yet another (agentically coded) language learning tracker
 
+<img src="public/risu.svg" alt="Risu squirrel" width="120">
+
 ### Why this one?
 The primary goal is to support importing data from a ton of different sources (csv immersion logs, anki, hello talk, kakao, line, steam play time etc) to give a more well rounded view of your total time spent learning a language.
 
-The secondary goal is to have pretty looking graphs, heatmaps, statistics, and goal tracking that his highly configurable to what you personally want to see.
+The secondary goal is to have pretty looking graphs, heatmaps, statistics, and goal tracking that is highly configurable to what you personally want to see.
 
 The third goal is to run this in a self-hostable web app targeting both desktop and mobile, so you can access it easily from anywhere.
 
