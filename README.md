@@ -1,41 +1,24 @@
 # Risu Tracker
+Yet another (agentically coded) language learning tracker
 
-A personal Japanese immersion tracker built with Astro and Svelte.
+### Why this one?
+The primary goal is to support importing data from a ton of different sources (csv immersion logs, anki, hello talk, kakao, line, steam play time etc) to give a more well rounded view of your total time spent learning a language.
 
-The app reads the latest CSV snapshot from `public/csvs/`, renders the
-immersion dashboard, and lets you add a new reading, listening, or anime log.
-Each submission creates a new CSV snapshot that can be reverted or cleaned up
-from the log dialog.
+The secondary goal is to have pretty looking graphs, heatmaps, statistics, and goal tracking that his highly configurable to what you personally want to see.
 
-## Development
+The third goal is to run this in a self-hostable web app targeting both desktop and mobile, so you can access it easily from anywhere.
 
-```sh
-npm install
-npm run dev
-```
+**However, it is still only a WIP toy project and not a real product yet.**
 
-The dashboard is available at `/japanese`; the root route redirects there.
+### Current TODOs
+- Add more robust data storage/ backend
+- Add more robust data importing from all data sources
+- Add kakao data source support
+- Add LINE data source support
+- Expand CSV data source support (currently only very superficially supports TMW discord immersion log CSVs only)
+- Remove hardcoding from components, making them functionally configurable
+- Make components visually configurable
+- Enable selection of data source for each component
 
-## Direction
-
-The next major step is a unified event model for Japanese activity. It should
-support multiple sources—immersion, Anki reviews and time, and input/output
-from services such as HelloTalk, LINE, and KakaoTalk—while preserving source
-metadata and allowing each metric to be toggled independently on a shared
-timeline.
-
-Before adding integrations, replace the CSV snapshot flow with a small
-versioned data store and importers for manually exported data. Astro + Svelte
-remains a reasonable fit for the dashboard and interactive charts; the
-storage/import layer should stay separate from the UI.
-
-## Anki
-
-The dashboard can optionally sync review history from a locally running Anki
-through [AnkiConnect](https://ankiweb.net/shared/info/2055492159). Install the
-plugin, keep Anki open, and use **Sync Anki** on the dashboard. The gear beside
-the button configures the AnkiConnect URL and remembers it in the browser. The
-self-hosted server proxies the request, so CORS is not needed when Risu Tracker
-and Anki run on the same machine. Syncs are repeatable:
-previously seen
-reviews are skipped, and new events retain their deck and review timing.
+### Dev instructions
+``npm install`` and ``npm run dev``, you know the drill
