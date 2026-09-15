@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { deriveHelloTalk, resolveHelloTalkConfig, type HelloTalkConfig, type HelloTalkImportInput, type HelloTalkImportPreview } from './hello-talk';
 import { DEFAULT_DASHBOARD_COMPONENTS, resolveDashboardComponents, type DashboardComponentConfig } from './dashboard-config';
+import { DEFAULT_READING_GOAL_CONFIG, resolveReadingGoalConfig, type ReadingGoalConfig } from './goal-config';
 
 export type ImmersionKind = 'reading' | 'listening' | 'anime' | 'manga' | 'other';
 
@@ -98,6 +99,12 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS dashboard_configs (
+    user_id TEXT PRIMARY KEY REFERENCES users(id),
+    config_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS goal_configs (
     user_id TEXT PRIMARY KEY REFERENCES users(id),
     config_json TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -364,6 +371,22 @@ export function saveDashboardConfig(components: unknown[], userId = DEFAULT_USER
     VALUES (?, ?)
     ON CONFLICT(user_id) DO UPDATE SET config_json = excluded.config_json, updated_at = CURRENT_TIMESTAMP
   `).run(userId, JSON.stringify(config));
+}
+
+export function getReadingGoalConfig(userId = DEFAULT_USER_ID): ReadingGoalConfig {
+  const row = db.prepare('SELECT config_json AS config FROM goal_configs WHERE user_id = ?').get(userId) as { config?: string } | undefined;
+  if (!row?.config) return DEFAULT_READING_GOAL_CONFIG;
+  try { return resolveReadingGoalConfig(JSON.parse(row.config) as Partial<ReadingGoalConfig>); } catch { return DEFAULT_READING_GOAL_CONFIG; }
+}
+
+export function saveReadingGoalConfig(config: Partial<ReadingGoalConfig>, userId = DEFAULT_USER_ID): ReadingGoalConfig {
+  const resolved = resolveReadingGoalConfig(config);
+  db.prepare(`
+    INSERT INTO goal_configs (user_id, config_json)
+    VALUES (?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET config_json = excluded.config_json, updated_at = CURRENT_TIMESTAMP
+  `).run(userId, JSON.stringify(resolved));
+  return resolved;
 }
 
 export function importImmersionCsv(rawCsv: string, fileName: string, userId = DEFAULT_USER_ID, source = 'csv-import'): CsvImportResult {
