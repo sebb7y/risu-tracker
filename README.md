@@ -1,5 +1,10 @@
 # Risu Tracker
-Yet another (agentically coded) language learning tracker
+
+[![WIP](https://img.shields.io/badge/WIP-yellow)](#current-todos)
+[![AI-assisted](https://img.shields.io/badge/AI--assisted-purple)](#dev-instructions)
+[![Poor code quality](https://img.shields.io/badge/poor_code_quality-orange)](#current-todos)
+
+A self-hostable, highly configurable language learning tracker.
 
 <img src="public/risu.svg" alt="Risu squirrel" width="200">
 
@@ -9,8 +14,6 @@ The primary goal is to support importing data from a ton of different sources (c
 The secondary goal is to have pretty looking graphs, heatmaps, statistics, and goal tracking that is highly configurable to what you personally want to see.
 
 The third goal is to run this in a self-hostable web app targeting both desktop and mobile, so you can access it easily from anywhere.
-
-**However, it is still only a WIP toy project and not a real product yet.**
 
 ### Current TODOs
 - Add more robust data storage/ backend
