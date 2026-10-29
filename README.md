@@ -1,7 +1,7 @@
 # Risu Tracker
 
 [![Status](https://img.shields.io/badge/status-WIP-yellow?style=flat-square)](#current-todos)
-[![AI](https://img.shields.io/badge/AI-assisted-purple?style=flat-square)](#dev-instructions)
+[![AI](https://img.shields.io/badge/AI-assisted-red?style=flat-square)](#dev-instructions)
 [![Code quality](https://img.shields.io/badge/code_quality-poor-orange?style=flat-square)](#current-todos)
 
 A self-hostable, highly configurable language learning tracker.
