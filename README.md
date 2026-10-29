@@ -4,7 +4,7 @@
 [![AI](https://img.shields.io/badge/AI-assisted-red?style=flat-square)](#dev-instructions)
 [![Code quality](https://img.shields.io/badge/code_quality-poor-orange?style=flat-square)](#current-todos)
 
-A self-hostable, highly configurable language learning tracker.
+Yet another (agentically coded) language learning tracker.
 
 <img src="public/risu.svg" alt="Risu squirrel" width="200">
 
