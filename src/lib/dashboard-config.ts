@@ -14,7 +14,7 @@ export interface DashboardComponentConfig {
 }
 
 export const DASHBOARD_SOURCES: DashboardSource[] = [
-  { key: 'immersion', label: 'Immersion logs', description: 'Reading, listening, anime, manga, and other logs' },
+  { key: 'immersion', label: 'Immersion logs', description: 'Reading, listening, anime, manga, books, visual novels, and other logs' },
   { key: 'anki', label: 'Anki', description: 'Review time and deck activity' },
   { key: 'hellotalk', label: 'HelloTalk', description: 'Calls, message output, and message reading' },
 ];

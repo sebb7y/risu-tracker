@@ -1,12 +1,14 @@
 import type { APIRoute } from 'astro';
-import { getServiceConfig, importHelloTalkCsv, importImmersionCsv } from '../../lib/db';
+import { getCsvImportConfig, getServiceConfig, importHelloTalkCsv, importImmersionCsv, type CsvImportOptions } from '../../lib/db';
+import { CSV_FORMATS, isCsvFormatId, type CsvFormatId } from '../../lib/csv-config';
 
 export const prerender = false;
 
 export const GET: APIRoute = async ({ url }) => {
   const service = url.searchParams.get('service');
-  if (service !== 'hellotalk') return Response.json({ error: 'Unknown service.' }, { status: 400 });
-  return Response.json({ config: getServiceConfig(service) });
+  if (service === 'hellotalk') return Response.json({ config: getServiceConfig(service) });
+  if (service === 'csv') return Response.json({ formats: CSV_FORMATS, config: getCsvImportConfig() });
+  return Response.json({ error: 'Unknown service.' }, { status: 400 });
 };
 
 export const POST: APIRoute = async ({ request }) => {
@@ -35,12 +37,29 @@ export const POST: APIRoute = async ({ request }) => {
       return Response.json({ error: message }, { status: 400 });
     }
   }
+
   const file = form.get('file');
   if (!(file instanceof File)) return Response.json({ error: 'Choose a CSV file.' }, { status: 400 });
   if (!file.name.toLowerCase().endsWith('.csv')) return Response.json({ error: 'Only CSV files are supported.' }, { status: 400 });
 
+  const requestedFormat = form.get('format');
+  const format: CsvFormatId = requestedFormat === null ? 'tmw' : isCsvFormatId(requestedFormat) ? requestedFormat : 'tmw';
+  if (requestedFormat !== null && !isCsvFormatId(requestedFormat)) {
+    return Response.json({ error: 'Unknown CSV format.' }, { status: 400 });
+  }
+
+  let config: unknown = undefined;
+  const rawConfig = form.get('config');
+  if (rawConfig !== null) {
+    try {
+      config = JSON.parse(String(rawConfig));
+    } catch {
+      return Response.json({ error: 'The CSV settings could not be read.' }, { status: 400 });
+    }
+  }
+
   try {
-    return Response.json(importImmersionCsv(await file.text(), file.name));
+    return Response.json(importImmersionCsv(await file.text(), file.name, { format, config: config as CsvImportOptions['config'] }));
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Could not import this CSV.';
     return Response.json({ error: message }, { status: 400 });

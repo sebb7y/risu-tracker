@@ -5,8 +5,10 @@ import path from 'node:path';
 import { deriveHelloTalk, resolveHelloTalkConfig, type HelloTalkConfig, type HelloTalkImportInput, type HelloTalkImportPreview } from './hello-talk';
 import { DEFAULT_DASHBOARD_COMPONENTS, resolveDashboardComponents, type DashboardComponentConfig } from './dashboard-config';
 import { DEFAULT_READING_GOAL_CONFIG, resolveReadingGoalConfig, type ReadingGoalConfig } from './goal-config';
+import { resolveCsvImportConfig, DEFAULT_CSV_IMPORT_CONFIG, isCsvFormatId, type CsvFormatId, type CsvImportConfigInput } from './csv-config';
+import { canonicalMediaType, deriveCsvRows, immersionMinutesFor, metricForKind, type ImmersionKind } from './csv-import';
 
-export type ImmersionKind = 'reading' | 'listening' | 'anime' | 'manga' | 'other';
+export type { ImmersionKind } from './csv-import';
 
 export interface ImmersionLog {
   logId: number;
@@ -18,6 +20,8 @@ export interface ImmersionLog {
   logDayKey: string;
   mediaName: string;
   comment: string;
+  format: string;
+  immersionMinutes: number;
 }
 
 export interface CsvImportResult {
@@ -26,6 +30,14 @@ export interface CsvImportResult {
   duplicates: number;
   invalid: number;
   fileName: string;
+  format: CsvFormatId;
+}
+
+export interface CsvImportOptions {
+  userId?: string;
+  source?: string;
+  format?: CsvFormatId;
+  config?: CsvImportConfigInput;
 }
 
 export interface HelloTalkImportResult extends HelloTalkImportPreview {
@@ -183,111 +195,8 @@ if (helloTalkDurationFixVersion < 2) {
   db.pragma('user_version = 2');
 }
 
-function splitCsvLine(line: string): string[] {
-  const cells: string[] = [];
-  let current = '';
-  let inQuotes = false;
-
-  for (let index = 0; index < line.length; index += 1) {
-    const char = line[index];
-    const next = line[index + 1];
-    if (char === '"' && inQuotes && next === '"') {
-      current += '"';
-      index += 1;
-    } else if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === ',' && !inQuotes) {
-      cells.push(current.trim());
-      current = '';
-    } else {
-      current += char;
-    }
-  }
-
-  cells.push(current.trim());
-  return cells;
-}
-
-function normalizeMediaType(mediaType: string): ImmersionKind {
-  const normalized = mediaType.toLowerCase();
-  if (normalized === 'reading time') return 'reading';
-  if (normalized === 'listening time') return 'listening';
-  if (normalized === 'anime') return 'anime';
-  if (normalized === 'manga') return 'manga';
-  return 'other';
-}
-
-function metricFor(kind: ImmersionKind): { metric: string; unit: string } {
-  if (kind === 'anime') return { metric: 'episodes', unit: 'episodes' };
-  if (kind === 'manga') return { metric: 'pages', unit: 'pages' };
-  return { metric: 'time', unit: 'minutes' };
-}
-
-function parseDate(value: string): Date | null {
-  // Treat CSV dates as calendar dates, not local timestamps. UTC noon keeps
-  // the date stable when the value is converted to an ISO string.
-  const datePart = value.trim().split(/[T ]/)[0];
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(datePart)) return null;
-  const parsed = new Date(`${datePart}T12:00:00.000Z`);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
 function fingerprint(values: string[]): string {
   return crypto.createHash('sha256').update(values.join('\u001f')).digest('hex');
-}
-
-interface ParsedCsvRow {
-  logId: number;
-  mediaType: string;
-  mediaName: string;
-  comment: string;
-  amount: number;
-  points: number;
-  date: Date;
-  raw: Record<string, string>;
-  fingerprint: string;
-}
-
-function parseCsv(rawCsv: string): { rows: ParsedCsvRow[]; invalid: number } {
-  const lines = rawCsv.split(/\r?\n/).filter((line) => line.trim().length > 0);
-  if (lines.length < 2) return { rows: [], invalid: 0 };
-
-  const headers = splitCsvLine(lines[0]);
-  const indexes = Object.fromEntries(headers.map((header, index) => [header, index]));
-  const required = ['Log ID', 'Media Type', 'Media Name', 'Comment', 'Amount Logged', 'Points Received', 'Log Date'];
-  if (required.some((header) => indexes[header] === undefined)) {
-    throw new Error(`CSV must contain these columns: ${required.join(', ')}`);
-  }
-
-  const rows: ParsedCsvRow[] = [];
-  let invalid = 0;
-  for (const line of lines.slice(1)) {
-    const cells = splitCsvLine(line);
-    const get = (header: string) => cells[indexes[header]] ?? '';
-    const logId = Number(get('Log ID'));
-    const amount = Number(get('Amount Logged'));
-    const points = Number(get('Points Received'));
-    const date = parseDate(get('Log Date'));
-    if (!Number.isInteger(logId) || logId <= 0 || !Number.isFinite(amount) || !Number.isFinite(points) || !date) {
-      invalid += 1;
-      continue;
-    }
-
-    const raw = Object.fromEntries(headers.map((header, index) => [header, cells[index] ?? '']));
-    rows.push({
-      logId,
-      mediaType: get('Media Type'),
-      mediaName: get('Media Name') || 'N/A',
-      comment: get('Comment') || 'No comment',
-      amount,
-      points,
-      date,
-      raw,
-      fingerprint: fingerprint([get('Log ID'), get('Media Type'), get('Amount Logged'), get('Log Date')]),
-    });
-  }
-
-  return { rows, invalid };
 }
 
 const insertEvent = db.prepare(`
@@ -389,37 +298,70 @@ export function saveReadingGoalConfig(config: Partial<ReadingGoalConfig>, userId
   return resolved;
 }
 
-export function importImmersionCsv(rawCsv: string, fileName: string, userId = DEFAULT_USER_ID, source = 'csv-import'): CsvImportResult {
-  const parsed = parseCsv(rawCsv);
-  const createBatch = db.prepare('INSERT INTO import_batches (user_id, source, file_name, invalid_count) VALUES (?, ?, ?, ?)');
+export function getCsvImportConfig(userId = DEFAULT_USER_ID): ReturnType<typeof resolveCsvImportConfig> {
+  const row = db.prepare("SELECT config_json AS config FROM service_configs WHERE user_id = ? AND service_key = 'csv'").get(userId) as { config?: string } | undefined;
+  if (!row?.config) return DEFAULT_CSV_IMPORT_CONFIG;
+  try { return resolveCsvImportConfig(JSON.parse(row.config)); } catch { return DEFAULT_CSV_IMPORT_CONFIG; }
+}
+
+export function saveCsvImportConfig(config: CsvImportConfigInput, userId = DEFAULT_USER_ID): ReturnType<typeof resolveCsvImportConfig> {
+  const resolved = resolveCsvImportConfig(config);
+  db.prepare(`
+    INSERT INTO service_configs (user_id, service_key, config_json, use_shared)
+    VALUES (?, 'csv', ?, 1)
+    ON CONFLICT(user_id, service_key) DO UPDATE SET config_json = excluded.config_json, updated_at = CURRENT_TIMESTAMP
+  `).run(userId, JSON.stringify(resolved));
+  return resolved;
+}
+
+export function importImmersionCsv(
+  rawCsv: string,
+  fileName: string,
+  options: CsvImportOptions = {},
+): CsvImportResult {
+  const userId = options.userId ?? DEFAULT_USER_ID;
+  const source = options.source ?? 'csv-import';
+  const format = options.format ?? 'tmw';
+  const config = resolveCsvImportConfig({ ...(options.config ?? getCsvImportConfig(userId)), format });
+  const derived = deriveCsvRows(rawCsv, format, config.formats[format].conversions);
+  const createBatch = db.prepare(`
+    INSERT INTO import_batches (user_id, source, file_name, invalid_count, config_json)
+    VALUES (?, ?, ?, ?, ?)
+  `);
   const updateBatch = db.prepare('UPDATE import_batches SET imported_count = ?, duplicate_count = ? WHERE id = ?');
   const run = db.transaction(() => {
-    const batch = createBatch.run(userId, source, fileName, parsed.invalid);
+    // Re-importing the same file should re-derive its rows with the current
+    // settings instead of treating every row as a duplicate.
+    const previousBatches = db.prepare('SELECT id FROM import_batches WHERE user_id = ? AND source = ? AND file_name = ?').all(userId, source, fileName) as Array<{ id: number }>;
+    for (const previousBatch of previousBatches) {
+      db.prepare('DELETE FROM activity_events WHERE import_batch_id = ?').run(previousBatch.id);
+      db.prepare('DELETE FROM import_batches WHERE id = ?').run(previousBatch.id);
+    }
+    saveCsvImportConfig(config, userId);
+    const batch = createBatch.run(userId, source, fileName, derived.invalid, JSON.stringify(config));
     let imported = 0;
     let duplicates = 0;
-    for (const row of parsed.rows) {
-      const kind = normalizeMediaType(row.mediaType);
-      const metric = metricFor(kind);
+    for (const row of derived.rows) {
       const result = insertEvent.run({
         userId,
         batchId: batch.lastInsertRowid,
-        metric: metric.metric,
+        metric: row.metric,
         value: row.amount,
-        unit: metric.unit,
+        unit: row.unit,
         occurredAt: row.date.toISOString(),
         title: row.mediaName,
         notes: row.comment,
         points: row.points,
         source,
-        sourceRecordId: String(row.logId),
+        sourceRecordId: row.sourceRecordId,
         fingerprint: row.fingerprint,
-        rawData: JSON.stringify(row.raw),
+        rawData: JSON.stringify({ ...row.raw, _format: format, _immersionMinutes: row.immersionMinutes }),
       });
       if (result.changes === 1) imported += 1;
       else duplicates += 1;
     }
     updateBatch.run(imported, duplicates, batch.lastInsertRowid);
-    return { batchId: Number(batch.lastInsertRowid), imported, duplicates, invalid: parsed.invalid, fileName };
+    return { batchId: Number(batch.lastInsertRowid), imported, duplicates, invalid: derived.invalid, fileName, format };
   });
 
   return run();
@@ -443,32 +385,40 @@ function ensureLegacyImport(): void {
   if (count.count > 0) return;
   const file = latestLegacyCsv();
   if (!file) return;
-  importImmersionCsv(fs.readFileSync(file, 'utf8'), path.basename(file), DEFAULT_USER_ID, 'legacy-csv');
+  importImmersionCsv(fs.readFileSync(file, 'utf8'), path.basename(file), { source: 'legacy-csv' });
 }
 
 export function getImmersionLogs(userId = DEFAULT_USER_ID): ImmersionLog[] {
   ensureLegacyImport();
   const rows = db.prepare(`
     SELECT source_record_id AS logId, title AS mediaName, notes AS comment, metric, value, points, occurred_at AS occurredAt,
-           json_extract(raw_data, '$."Media Type"') AS mediaType
+           json_extract(raw_data, '$."Media Type"') AS mediaType,
+           json_extract(raw_data, '$._format') AS format
       FROM activity_events
      WHERE user_id = ? AND activity_type = 'immersion'
      ORDER BY occurred_at ASC, id ASC
-  `).all(userId) as Array<{ logId: string; mediaName: string; comment: string; metric: string; value: number; points: number; occurredAt: string; mediaType: string }>;
+  `).all(userId) as Array<{ logId: string; mediaName: string; comment: string; metric: string; value: number; points: number; occurredAt: string; mediaType: string; format: string | null }>;
+
+  const config = getCsvImportConfig(userId);
 
   return rows.map((row) => {
     const date = new Date(row.occurredAt);
     const mediaType = row.mediaType || (row.metric === 'episodes' ? 'Anime' : 'Reading Time');
+    const canonicalType = canonicalMediaType(mediaType);
+    const format = isCsvFormatId(row.format) ? row.format : 'tmw';
+    const conversions = config.formats[format].conversions;
     return {
       logId: Number(row.logId),
       mediaType,
-      canonicalType: normalizeMediaType(mediaType),
+      canonicalType,
       amount: row.value,
       points: row.points,
       date,
       logDayKey: date.toISOString().slice(0, 10),
       mediaName: row.mediaName || 'N/A',
       comment: row.comment || 'No comment',
+      format,
+      immersionMinutes: immersionMinutesFor(row.value, canonicalType, conversions),
     };
   });
 }
@@ -483,7 +433,7 @@ export function addImmersionLog(input: {
 }, userId = DEFAULT_USER_ID): void {
   const mediaType = input.kind === 'reading' ? 'Reading Time' : input.kind === 'listening' ? 'Listening Time' : 'Anime';
   const points = input.kind === 'anime' ? input.amount * 13 : (input.amount / 60) * 40.2;
-  const metric = metricFor(normalizeMediaType(mediaType));
+  const metric = metricForKind(canonicalMediaType(mediaType));
   insertEvent.run({
     userId,
     batchId: null,

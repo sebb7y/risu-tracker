@@ -17,7 +17,7 @@ The third goal is to run this in a self-hostable web app targeting both desktop 
 - Add more robust data importing from all data sources
 - Add kakao data source support
 - Add LINE data source support
-- Expand CSV data source support (currently only very superficially supports TMW discord immersion log CSVs only)
+- Expand CSV data source support (TMW immersion logs and a generic CSV format are supported with per-format conversion settings)
 - Remove hardcoding from components, making them functionally configurable
 - Make components visually configurable
 - Enable selection of data source for each component

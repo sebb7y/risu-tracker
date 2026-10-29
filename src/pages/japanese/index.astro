@@ -11,11 +11,12 @@ import DashboardSidebar from '../../components/svelte/DashboardSidebar.svelte';
 import ReadingGoalSettings from '../../components/svelte/ReadingGoalSettings.svelte';
 import { DASHBOARD_SOURCES } from '../../lib/dashboard-config';
 import { getDailyActivityMetrics, getDashboardConfig, getImmersionLogs, getReadingGoalConfig } from '../../lib/db';
+import { canonicalMediaType, type ImmersionKind } from '../../lib/csv-import';
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-type CanonicalMediaType = 'reading' | 'listening' | 'anime' | 'manga' | 'other';
+type CanonicalMediaType = ImmersionKind;
 
 interface ImmersionLog {
   logId: number;
@@ -57,12 +58,15 @@ interface CsvSnapshotEntry {
 }
 
 const CSV_SEARCH_DIRS = ['src/data/csvs', 'public/csvs', 'public/svgs'];
-const TYPE_ORDER: CanonicalMediaType[] = ['reading', 'listening', 'anime', 'manga', 'other'];
+const TYPE_ORDER: CanonicalMediaType[] = ['reading', 'listening', 'anime', 'manga', 'book', 'visual-novel', 'reading-text', 'other'];
 const TYPE_LABELS: Record<CanonicalMediaType, string> = {
   reading: 'Reading Time',
   listening: 'Listening Time',
   anime: 'Anime',
   manga: 'Manga',
+  book: 'Book',
+  'visual-novel': 'Visual Novel',
+  'reading-text': 'Reading',
   other: 'Other',
 };
 
@@ -70,7 +74,10 @@ const RECENT_LOG_EXPORT_LABELS: Record<CanonicalMediaType, string> = {
   reading: 'Reading Time (in minutes)',
   listening: 'Listening Time (in minutes)',
   anime: 'Anime (in episodes watched)',
-  manga: 'Manga',
+  manga: 'Manga (in pages read)',
+  book: 'Book (in pages read)',
+  'visual-novel': 'Visual Novel (in characters read)',
+  'reading-text': 'Reading (in characters read)',
   other: 'Other',
 };
 
@@ -82,6 +89,9 @@ const TYPE_COLORS: Record<CanonicalMediaType, string> = {
   listening: 'bg-cyan-500 dark:bg-cyan-400',
   anime: 'bg-rose-500 dark:bg-rose-400',
   manga: 'bg-emerald-500 dark:bg-emerald-400',
+  book: 'bg-amber-500 dark:bg-amber-400',
+  'visual-novel': 'bg-violet-500 dark:bg-violet-400',
+  'reading-text': 'bg-teal-500 dark:bg-teal-400',
   other: 'bg-slate-500 dark:bg-slate-400',
 };
 
@@ -116,15 +126,6 @@ function splitCsvLine(line: string): string[] {
 
   cells.push(current.trim());
   return cells;
-}
-
-function normalizeMediaType(mediaType: string): CanonicalMediaType {
-  const normalized = mediaType.toLowerCase();
-  if (normalized === 'reading time') return 'reading';
-  if (normalized === 'listening time') return 'listening';
-  if (normalized === 'anime') return 'anime';
-  if (normalized === 'manga') return 'manga';
-  return 'other';
 }
 
 function startOfDay(date: Date): Date {
@@ -367,7 +368,7 @@ async function loadImmersionLogsFromCsv(csvPath: string) {
     logs.push({
       logId,
       mediaType,
-      canonicalType: normalizeMediaType(mediaType),
+      canonicalType: canonicalMediaType(mediaType),
       amount,
       points,
       date: parsedDate,
@@ -390,7 +391,8 @@ function mergeOptionalField(current: string | null, incoming: string | null): st
 function formatRecentAmountLabel(type: CanonicalMediaType, amount: number): string {
   const rounded = Math.round(amount);
   if (type === 'anime') return `${rounded} ep`;
-  if (type === 'manga') return `${rounded} pages`;
+  if (type === 'manga' || type === 'book') return `${rounded} pages`;
+  if (type === 'visual-novel' || type === 'reading-text') return `${rounded} chars`;
   return `${rounded}m`;
 }
 
@@ -495,6 +497,9 @@ const chartTypes = [
     { key: 'listening', label: 'Listening time', color: '#06b6d4' },
     { key: 'anime', label: 'Anime', color: '#f43f5e' },
     { key: 'manga', label: 'Manga', color: '#10b981' },
+    { key: 'book', label: 'Book', color: '#f59e0b' },
+    { key: 'visual-novel', label: 'Visual Novel', color: '#8b5cf6' },
+    { key: 'reading-text', label: 'Reading', color: '#14b8a6' },
     { key: 'other', label: 'Other', color: '#64748b' },
   ] : []),
   ...(timelineSources.has('anki') ? [
@@ -515,7 +520,7 @@ for (const log of timelineSources.has('immersion') ? logs : []) {
   }
   const value = chartByDay.get(log.logDayKey)![log.canonicalType];
   value.points += log.points;
-  value.hours += log.points / 40.2;
+  value.hours += log.immersionMinutes / 60;
 }
 
 for (const metric of timelineSources.has('anki') ? ankiMetrics : []) {
@@ -563,22 +568,34 @@ const logDefaults = {
 
 const byDay = new Map<string, number>();
 const byMonth = new Map<string, MonthBucket>();
-const byYear = new Map<number, { points: number; readingMinutes: number; listeningMinutes: number; animeEpisodes: number; mangaPages: number }>();
+interface YearBucket {
+  points: number;
+  convertedMinutes: number;
+  readingMinutes: number;
+  listeningMinutes: number;
+  animeEpisodes: number;
+  mangaPages: number;
+  bookPages: number;
+  visualNovelCharacters: number;
+  readingCharacters: number;
+}
+const byYear = new Map<number, YearBucket>();
 const readingByDay = new Map<string, number>();
 const unknownTypes = new Set<string>();
+const READING_KINDS = new Set<CanonicalMediaType>(['reading', 'manga', 'book', 'visual-novel', 'reading-text']);
 
 for (const log of logs) {
   const day = log.logDayKey;
   byDay.set(day, (byDay.get(day) ?? 0) + log.points);
-  if (log.canonicalType === 'reading') readingByDay.set(day, (readingByDay.get(day) ?? 0) + log.amount);
+  if (READING_KINDS.has(log.canonicalType)) readingByDay.set(day, (readingByDay.get(day) ?? 0) + log.immersionMinutes);
 
   const month = log.logDayKey.slice(0, 7);
   if (!byMonth.has(month)) {
     byMonth.set(month, {
       key: month,
       label: new Date(`${month}-01T00:00:00Z`).toLocaleString('en-US', { month: 'short', year: 'numeric' }),
-      totals: { reading: 0, listening: 0, anime: 0, manga: 0, other: 0 },
-      raw: { reading: 0, listening: 0, anime: 0, manga: 0, other: 0 },
+      totals: { reading: 0, listening: 0, anime: 0, manga: 0, book: 0, 'visual-novel': 0, 'reading-text': 0, other: 0 },
+      raw: { reading: 0, listening: 0, anime: 0, manga: 0, book: 0, 'visual-novel': 0, 'reading-text': 0, other: 0 },
     });
   }
 
@@ -588,14 +605,28 @@ for (const log of logs) {
 
   const year = Number(log.logDayKey.slice(0, 4));
   if (!byYear.has(year)) {
-    byYear.set(year, { points: 0, readingMinutes: 0, listeningMinutes: 0, animeEpisodes: 0, mangaPages: 0 });
+    byYear.set(year, {
+      points: 0,
+      convertedMinutes: 0,
+      readingMinutes: 0,
+      listeningMinutes: 0,
+      animeEpisodes: 0,
+      mangaPages: 0,
+      bookPages: 0,
+      visualNovelCharacters: 0,
+      readingCharacters: 0,
+    });
   }
   const yearBucket = byYear.get(year)!;
   yearBucket.points += log.points;
+  yearBucket.convertedMinutes += log.immersionMinutes;
   if (log.canonicalType === 'reading') yearBucket.readingMinutes += log.amount;
   else if (log.canonicalType === 'listening') yearBucket.listeningMinutes += log.amount;
   else if (log.canonicalType === 'anime') yearBucket.animeEpisodes += log.amount;
   else if (log.canonicalType === 'manga') yearBucket.mangaPages += log.amount;
+  else if (log.canonicalType === 'book') yearBucket.bookPages += log.amount;
+  else if (log.canonicalType === 'visual-novel') yearBucket.visualNovelCharacters += log.amount;
+  else if (log.canonicalType === 'reading-text') yearBucket.readingCharacters += log.amount;
   else unknownTypes.add(log.mediaType);
 }
 
@@ -614,6 +645,9 @@ const monthRows = [...months]
       `Listening: ${number(month.raw.listening)} min (${formatPoints(month.totals.listening)} pts)`,
       `Anime: ${number(month.raw.anime)} eps (${formatPoints(month.totals.anime)} pts)`,
       `Manga: ${number(month.raw.manga)} pages (${formatPoints(month.totals.manga)} pts)`,
+      `Book: ${number(month.raw.book)} pages (${formatPoints(month.totals.book)} pts)`,
+      `Visual Novel: ${number(month.raw['visual-novel'])} chars (${formatPoints(month.totals['visual-novel'])} pts)`,
+      `Reading (chars): ${number(month.raw['reading-text'])} chars (${formatPoints(month.totals['reading-text'])} pts)`,
       `Other: ${number(month.raw.other)} units (${formatPoints(month.totals.other)} pts)`,
     ].join('\n');
     const barSegments = TYPE_ORDER.flatMap((type) => {
@@ -744,10 +778,25 @@ const animeEpisodesTotal = logs
 const mangaPagesTotal = logs
   .filter((log) => log.canonicalType === 'manga')
   .reduce((sum, log) => sum + log.amount, 0);
+const bookPagesTotal = logs
+  .filter((log) => log.canonicalType === 'book')
+  .reduce((sum, log) => sum + log.amount, 0);
+const visualNovelCharactersTotal = logs
+  .filter((log) => log.canonicalType === 'visual-novel')
+  .reduce((sum, log) => sum + log.amount, 0);
+const readingCharactersTotal = logs
+  .filter((log) => log.canonicalType === 'reading-text')
+  .reduce((sum, log) => sum + log.amount, 0);
 
-const convertedAnimeMinutes = animeEpisodesTotal * 20;
-const convertedMangaMinutes = mangaPagesTotal * (60 / 200);
-const totalConvertedMinutes = readingMinutesTotal + listeningMinutesTotal + convertedAnimeMinutes + convertedMangaMinutes;
+const convertedMinutesFor = (kind: CanonicalMediaType) =>
+  logs.filter((log) => log.canonicalType === kind).reduce((sum, log) => sum + log.immersionMinutes, 0);
+
+const convertedAnimeMinutes = convertedMinutesFor('anime');
+const convertedMangaMinutes = convertedMinutesFor('manga');
+const convertedBookMinutes = convertedMinutesFor('book');
+const convertedVisualNovelMinutes = convertedMinutesFor('visual-novel');
+const convertedReadingCharactersMinutes = convertedMinutesFor('reading-text');
+const totalConvertedMinutes = logs.reduce((sum, log) => sum + log.immersionMinutes, 0);
 
 const activeDays = [...byDay.values()].filter((points) => points > 0).length;
 const avgPointsPerActiveDay = activeDays ? totalPoints / activeDays : 0;
@@ -969,6 +1018,9 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
           <li>Listening time: {number(listeningMinutesTotal)} min ({formatHoursAndMinutes(listeningMinutesTotal)})</li>
           <li>Anime: {number(animeEpisodesTotal)} episodes (≈ {formatHoursAndMinutes(convertedAnimeMinutes)})</li>
           <li>Manga: {number(mangaPagesTotal)} pages (≈ {formatHoursAndMinutes(convertedMangaMinutes)})</li>
+          <li>Book: {number(bookPagesTotal)} pages (≈ {formatHoursAndMinutes(convertedBookMinutes)})</li>
+          <li>Visual Novel: {number(visualNovelCharactersTotal)} characters (≈ {formatHoursAndMinutes(convertedVisualNovelMinutes)})</li>
+          <li>Reading (chars): {number(readingCharactersTotal)} characters (≈ {formatHoursAndMinutes(convertedReadingCharactersMinutes)})</li>
         </ul>
       </article>
 
@@ -976,22 +1028,19 @@ const otherHeatmaps = otherHeatmapYears.map((y) => {
         <h2 class="text-xl font-semibold">By Year</h2>
         <div class="space-y-3">
           {yearly.map(([year, values]) => {
-            const convertedMinutes =
-              values.readingMinutes +
-              values.listeningMinutes +
-              values.animeEpisodes * 20 +
-              values.mangaPages * (60 / 200);
-
             return (
               <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
                 <p class="text-base font-semibold">{year}</p>
                 <p class="text-sm text-slate-600 dark:text-slate-300">{formatPoints(values.points)} points</p>
                 <p class="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                  {formatHoursAndMinutes(convertedMinutes)} total
+                  {formatHoursAndMinutes(values.convertedMinutes)} total
                   · {number(values.readingMinutes)} read min
                   · {number(values.listeningMinutes)} listen min
                   · {number(values.animeEpisodes)} eps
-                  · {number(values.mangaPages)} pages
+                  · {number(values.mangaPages)} manga pages
+                  · {number(values.bookPages)} book pages
+                  · {number(values.visualNovelCharacters)} VN chars
+                  · {number(values.readingCharacters)} read chars
                 </p>
               </div>
             );
