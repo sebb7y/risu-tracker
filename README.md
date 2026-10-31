@@ -2,7 +2,7 @@
 
 [![Status](https://img.shields.io/badge/status-WIP-yellow?style=flat-square)](#current-todos)
 [![AI](https://img.shields.io/badge/AI-assisted-red?style=flat-square)](#dev-instructions)
-[![Code quality](https://img.shields.io/badge/code_quality-poor-orange?style=flat-square)](#current-todos)
+[![Quality gate](https://img.shields.io/sonar/quality_gate/sebb7y_risu-tracker?server=https%3A%2F%2Fsonarcloud.io&style=flat-square)](https://sonarcloud.io/project/overview?id=sebb7y_risu-tracker)
 
 Yet another (agentically coded) language learning tracker.
 
